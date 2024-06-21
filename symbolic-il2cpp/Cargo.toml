@@ -1,0 +1,18 @@
+[package]
+name = "symbolic-il2cpp"
+version = "8.2.0-dd"
+license = "MIT"
+authors = ["Sentry <hello@sentry.io>"]
+documentation = "https://docs.rs/symbolic-il2cpp"
+homepage = "https://github.com/getsentry/symbolic"
+repository = "https://github.com/getsentry/symbolic"
+description = """
+A library for parsing il2cpp line mappings.
+"""
+edition = "2018"
+
+[dependencies]
+indexmap = "1.8.0"
+serde_json = "1.0.79"
+symbolic-common = { version = "8.2.0-dd", path = "../symbolic-common" }
+symbolic-debuginfo = { version = "8.2.0-dd", path = "../symbolic-debuginfo" }
