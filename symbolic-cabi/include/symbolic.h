@@ -118,7 +118,7 @@ typedef struct SymbolicCfiCache SymbolicCfiCache;
  */
 typedef struct SymbolicFrameInfoMap SymbolicFrameInfoMap;
 
-typedef struct SymbolicLineMapping SymbolicLineMapping;
+typedef struct SymbolicIL2CPPLineMapping SymbolicIL2CPPLineMapping;
 
 /**
  * A single arch object.
@@ -204,10 +204,10 @@ typedef struct SymbolicObjectFeatures {
   bool sources;
 } SymbolicObjectFeatures;
 
-typedef struct SymbolicLineMappingResult {
+typedef struct SymbolicIL2CPPLineMappingResult {
   struct SymbolicStr file;
   uint32_t line;
-} SymbolicLineMappingResult;
+} SymbolicIL2CPPLineMappingResult;
 
 /**
  * OS and CPU information in a minidump.
@@ -548,19 +548,19 @@ struct SymbolicStr symbolic_demangle_no_args(const struct SymbolicStr *ident,
 /**
  * Creates an archive from a byte buffer without taking ownership of the pointer.
  */
-struct SymbolicLineMapping *symbolic_il2cpp_line_mapping_from_bytes(const uint8_t *bytes,
-                                                                    uintptr_t len);
+struct SymbolicIL2CPPLineMapping *symbolic_il2cpp_line_mapping_from_bytes(const uint8_t *bytes,
+                                                                          uintptr_t len);
 
-void symbolic_il2cpp_line_mapping_free(struct SymbolicLineMapping *mapping);
+void symbolic_il2cpp_line_mapping_free(struct SymbolicIL2CPPLineMapping *mapping);
 
 /**
  * Looks up a source location.
  */
-struct SymbolicLineMappingResult symbolic_il2cpp_line_mapping_lookup(const struct SymbolicLineMapping *line_mapping_ptr,
-                                                                     const char *file,
-                                                                     uint32_t line);
+struct SymbolicIL2CPPLineMappingResult symbolic_il2cpp_line_mapping_lookup(const struct SymbolicIL2CPPLineMapping *line_mapping_ptr,
+                                                                           const char *file,
+                                                                           uint32_t line);
 
-void symbolic_il2cpp_line_mapping_result_free(struct SymbolicLineMappingResult *result);
+void symbolic_il2cpp_line_mapping_result_free(struct SymbolicIL2CPPLineMappingResult *result);
 
 /**
  * Creates a new frame info map.
