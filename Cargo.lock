@@ -2489,6 +2489,7 @@ dependencies = [
 name = "symbolic-cabi"
 version = "13.9.0"
 dependencies = [
+ "anyhow",
  "proguard",
  "sourcemap",
  "symbolic",
