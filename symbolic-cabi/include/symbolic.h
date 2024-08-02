@@ -80,6 +80,8 @@ typedef struct SymbolicBcSymbolMap SymbolicBcSymbolMap;
  */
 typedef struct SymbolicCfiCache SymbolicCfiCache;
 
+typedef struct SymbolicIL2CPPLineMapping SymbolicIL2CPPLineMapping;
+
 /**
  * A single arch object.
  */
@@ -158,6 +160,11 @@ typedef struct SymbolicObjectFeatures {
   bool unwind;
   bool sources;
 } SymbolicObjectFeatures;
+
+typedef struct SymbolicIL2CPPLineMappingResult {
+  struct SymbolicStr file;
+  uint32_t line;
+} SymbolicIL2CPPLineMappingResult;
 
 /**
  * Represents a Java Stack Frame.
@@ -496,6 +503,42 @@ struct SymbolicStr symbolic_normalize_code_id(const struct SymbolicStr *code_id)
  * Normalizes a debug identifier to default representation.
  */
 struct SymbolicStr symbolic_normalize_debug_id(const struct SymbolicStr *debug_id);
+
+/**
+ * Demangles a given identifier.
+ *
+ * This demangles with the default behavior in symbolic. If no language
+ * is specified, it will be auto-detected.
+ */
+struct SymbolicStr symbolic_demangle(const struct SymbolicStr *ident,
+                                     const struct SymbolicStr *lang);
+
+/**
+ * Demangles a given identifier.
+ *
+ * This is similar to `symbolic_demangle` but does not demangle the
+ * arguments and instead strips them. If no language is specified, it
+ * will be auto-detected.
+ */
+struct SymbolicStr symbolic_demangle_no_args(const struct SymbolicStr *ident,
+                                             const struct SymbolicStr *lang);
+
+/**
+ * Creates an archive from a byte buffer without taking ownership of the pointer.
+ */
+struct SymbolicIL2CPPLineMapping *symbolic_il2cpp_line_mapping_from_bytes(const uint8_t *bytes,
+                                                                          uintptr_t len);
+
+void symbolic_il2cpp_line_mapping_free(struct SymbolicIL2CPPLineMapping *mapping);
+
+/**
+ * Looks up a source location.
+ */
+struct SymbolicIL2CPPLineMappingResult symbolic_il2cpp_line_mapping_lookup(const struct SymbolicIL2CPPLineMapping *line_mapping_ptr,
+                                                                           const char *file,
+                                                                           uint32_t line);
+
+void symbolic_il2cpp_line_mapping_result_free(struct SymbolicIL2CPPLineMappingResult *result);
 
 /**
  * Creates a proguard mapping view from a path.
