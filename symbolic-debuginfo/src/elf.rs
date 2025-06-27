@@ -305,6 +305,7 @@ impl<'data> ElfObject<'data> {
                     ));
 
                     obj.dynstrtab = return_partial_on_err!(get_strtab(&obj.section_headers, shdr.sh_link as usize));
+                    break;
                 }
             }
         }
