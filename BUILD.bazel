@@ -1,0 +1,243 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_shared_library")
+load("@symbolic_crate_index//:defs.bzl", "aliases", "all_crate_deps")
+
+# Base common library - no internal dependencies
+rust_library(
+    name = "symbolic-common",
+    srcs = glob(["symbolic-common/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [
+        "serde",
+    ],
+    crate_name = "symbolic_common",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-common",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-common") + [
+        "@symbolic_crate_index//:serde-1.0.217",
+    ],
+)
+
+# Demangle library - depends on symbolic-common
+rust_library(
+    name = "symbolic-demangle",
+    srcs = glob(["symbolic-demangle/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [
+        "cpp",
+        "msvc",
+        "rust",
+        "swift",
+    ],
+    crate_name = "symbolic_demangle",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-demangle",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-demangle") + [":symbolic-common"],
+)
+
+# PPDB library - depends on symbolic-common
+rust_library(
+    name = "symbolic-ppdb",
+    srcs = glob(["symbolic-ppdb/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "symbolic_ppdb",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-ppdb",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-ppdb") + [":symbolic-common"],
+)
+
+# Sourcemap cache library - depends on symbolic-common
+rust_library(
+    name = "symbolic-sourcemapcache",
+    srcs = glob(["symbolic-sourcemapcache/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "symbolic_sourcemapcache",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-sourcemapcache",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-sourcemapcache") + [":symbolic-common"],
+)
+
+# Unreal library - no internal dependencies
+rust_library(
+    name = "symbolic-unreal",
+    srcs = glob(["symbolic-unreal/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [
+        "serde",
+    ],
+    crate_name = "symbolic_unreal",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-unreal",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-unreal") + [
+        "@symbolic_crate_index//:serde-1.0.217",
+    ],
+)
+
+# Debuginfo library - depends on symbolic-common and symbolic-ppdb
+rust_library(
+    name = "symbolic-debuginfo",
+    srcs = glob([
+        "symbolic-debuginfo/src/**/*.rs",
+        "symbolic-debuginfo/benches/**/*.rs",
+    ]),
+    aliases = aliases(),
+    crate_features = [
+        "breakpad",
+        "dwarf",
+        "elf",
+        "macho",
+        "ms",
+        "ppdb",
+        "sourcebundle",
+        "js",
+        "wasm",
+    ],
+    crate_name = "symbolic_debuginfo",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-debuginfo",
+        proc_macro = True,
+    ),
+    # rustc_flags = ["--all-features"],
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-debuginfo") + [
+        ":symbolic-common",
+        ":symbolic-ppdb",
+    ],
+)
+
+# IL2CPP library - depends on symbolic-common and symbolic-debuginfo
+rust_library(
+    name = "symbolic-il2cpp",
+    srcs = glob(["symbolic-il2cpp/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "symbolic_il2cpp",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-il2cpp",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-il2cpp") + [
+        ":symbolic-common",
+        ":symbolic-debuginfo",
+    ],
+)
+
+# CFI library - depends on symbolic-common and symbolic-debuginfo
+rust_library(
+    name = "symbolic-cfi",
+    srcs = glob(["symbolic-cfi/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "symbolic_cfi",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-cfi",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-cfi") + [
+        ":symbolic-common",
+        ":symbolic-debuginfo",
+    ],
+)
+
+# Symcache library - depends on symbolic-common, symbolic-debuginfo, and symbolic-il2cpp
+rust_library(
+    name = "symbolic-symcache",
+    srcs = glob([
+        "symbolic-symcache/src/**/*.rs",
+        "symbolic-symcache/benches/**/*.rs",
+    ]),
+    aliases = aliases(),
+    crate_features = [
+        "bench",
+        "il2cpp",
+    ],
+    crate_name = "symbolic_symcache",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-symcache",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-symcache") + [
+        ":symbolic-common",
+        ":symbolic-debuginfo",
+        ":symbolic-il2cpp",
+    ],
+)
+
+# # Main symbolic library - depends on all other libraries
+rust_library(
+    name = "symbolic",
+    srcs = glob(["symbolic/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [
+        "cfi",
+        "common-serde",
+        "debuginfo",
+        "debuginfo-serde",
+        "demangle",
+        "il2cpp",
+        "ppdb",
+        "sourcemapcache",
+        "symcache",
+        "unreal",
+        "unreal-serde",
+    ],
+    crate_name = "symbolic",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic") + [
+        ":symbolic-common",
+        ":symbolic-cfi",
+        ":symbolic-debuginfo",
+        ":symbolic-demangle",
+        ":symbolic-il2cpp",
+        ":symbolic-ppdb",
+        ":symbolic-sourcemapcache",
+        ":symbolic-symcache",
+        ":symbolic-unreal",
+    ],
+)
+
+# C API library - depends on the main symbolic library
+rust_shared_library(
+    name = "symbolic-cabi",
+    srcs = glob(["symbolic-cabi/src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "symbolic_cabi",
+    edition = "2021",
+    proc_macro_deps = all_crate_deps(
+        package_name = "symbolic-cabi",
+        proc_macro = True,
+    ),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(package_name = "symbolic-cabi") + [
+        ":symbolic",
+    ],
+)
