@@ -1,27 +1,6 @@
-bazel_dep(name = "rules_rust", version = "0.65.0")
-
-crate = use_extension("@rules_rust//crate_universe:extension.bzl", "crate")
-
-crate.from_cargo(
-    name = "symbolic_crate_index",
-    cargo_lockfile = "//:Cargo.lock",
-    manifests = [
-        "//:Cargo.toml",
-        "symbolic/Cargo.toml",
-        "symbolic-cabi/Cargo.toml",
-        "symbolic-cfi/Cargo.toml",
-        "symbolic-common/Cargo.toml",
-        "symbolic-debuginfo/Cargo.toml",
-        "symbolic-demangle/Cargo.toml",
-        "symbolic-il2cpp/Cargo.toml",
-        "symbolic-ppdb/Cargo.toml",
-        "symbolic-sourcemapcache/Cargo.toml",
-        "symbolic-symcache/Cargo.toml",
-        "symbolic-unreal/Cargo.toml",
-    ],
-)
-
-use_repo(
-    crate,
-    "symbolic_crate_index",
-)
+###############################################################################
+# Bazel now uses Bzlmod by default to manage external dependencies.
+# Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.
+#
+# For more details, please check https://github.com/bazelbuild/bazel/issues/18958
+###############################################################################
