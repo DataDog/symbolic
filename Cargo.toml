@@ -63,7 +63,8 @@ walkdir = "2.3.1"
 wasmparser = "0.209.1"
 watto = { version = "0.1.0", features = ["writer", "strings"] }
 # We are currently pinning a known good version prior to https://github.com/zip-rs/zip2/issues/189
-zip = { version = "=2.1.1", default-features = false, features = ["deflate"] }
+# (dd) NOTE: previously pinned to 2.1.1, however this version is now yanked from crates.io
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 zstd = { version = "0.13.1" }
 
 
