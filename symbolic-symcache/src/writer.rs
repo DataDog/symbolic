@@ -10,6 +10,7 @@ use symbolic_debuginfo::{DebugSession, FileFormat, Function, ObjectLike, Symbol}
 use watto::{Pod, StringTable, Writer};
 
 use super::{raw, transform};
+use crate::raw::NO_SOURCE_LOCATION;
 use crate::{Error, ErrorKind};
 
 /// The SymCache Converter.
@@ -188,8 +189,7 @@ impl<'a> SymCacheConverter<'a> {
         let mut inlinee_ranges = Vec::new();
         for inlinee in &function.inlinees {
             for line in &inlinee.lines {
-                let start = line.address as u32;
-                let end = (line.address + line.size.unwrap_or(1)) as u32;
+                let (start, end) = line_boundaries(line.address, line.size);
                 inlinee_ranges.push(start..end);
             }
         }
@@ -213,8 +213,7 @@ impl<'a> SymCacheConverter<'a> {
 
         // Iterate over the line records.
         while let Some(line) = next_line.take() {
-            let line_range_start = line.address as u32;
-            let line_range_end = (line.address + line.size.unwrap_or(1)) as u32;
+            let (line_range_start, line_range_end) = line_boundaries(line.address, line.size);
 
             // Find the call location for this line.
             while next_call_location.is_some() && next_call_location.unwrap().0 <= line_range_start
@@ -308,16 +307,19 @@ impl<'a> SymCacheConverter<'a> {
             let mut current_address = line_range_start;
             while current_address < line_range_end {
                 // Emit our source location at current_address if current_address is not covered by an inlinee.
-                if next_inline.is_none() || next_inline.as_ref().unwrap().start > current_address {
+                if next_inline
+                    .as_ref()
+                    .is_none_or(|next| next.start > current_address)
+                {
                     // "insert_range"
                     self.ranges.insert(current_address, source_location.clone());
                 }
 
                 // If there is an inlinee range covered by this line record, turn this line into that
                 // call's "call line". Make a `call_location_idx` for it and store it in `callee_call_locations`.
-                if next_inline.is_some() && next_inline.as_ref().unwrap().start < line_range_end {
-                    let inline_range = next_inline.take().unwrap();
-
+                if let Some(inline_range) =
+                    take_if(&mut next_inline, |next| next.start < line_range_end)
+                {
                     // "make_call_location"
                     let (call_location_idx, _) =
                         self.call_locations.insert_full(source_location.clone());
@@ -341,8 +343,9 @@ impl<'a> SymCacheConverter<'a> {
             // multiple identical small "call line" records instead of one combined record
             // covering the entire inlinee range. We can't have different "call lines" for a single
             // inlinee range anyway, so it's fine to skip these.
-            while next_line.is_some()
-                && (next_line.as_ref().unwrap().address as u32) < current_address
+            while next_line
+                .as_ref()
+                .is_some_and(|next| (next.address as u32) < current_address)
             {
                 next_line = line_iter.next();
             }
@@ -350,7 +353,7 @@ impl<'a> SymCacheConverter<'a> {
 
         if !function.inline {
             // add the bare minimum of information for the function if there isn't any.
-            self.ranges.entry(entry_pc).or_insert(raw::SourceLocation {
+            insert_source_location(&mut self.ranges, entry_pc, || raw::SourceLocation {
                 file_idx: u32::MAX,
                 line: 0,
                 function_idx,
@@ -371,6 +374,19 @@ impl<'a> SymCacheConverter<'a> {
         let last_addr = self.last_addr.get_or_insert(0);
         if function_end > *last_addr {
             *last_addr = function_end;
+        }
+
+        // Insert an explicit "empty" mapping for the end of the function.
+        // This is to ensure that addresses that fall "between" functions don't get
+        // erroneously mapped to the previous function.
+        //
+        // We only do this if there is no previous mapping for the end address—we don't
+        // want to overwrite valid mappings.
+        //
+        // If the next function starts right at this function's end, that's no trouble,
+        // it will just overwrite this mapping with one of its ranges.
+        if let btree_map::Entry::Vacant(vacant_entry) = self.ranges.entry(function_end) {
+            vacant_entry.insert(NO_SOURCE_LOCATION);
         }
     }
 
@@ -397,36 +413,44 @@ impl<'a> SymCacheConverter<'a> {
             self.string_table.insert(function_name) as u32
         };
 
-        match self.ranges.entry(symbol.address as u32) {
-            btree_map::Entry::Vacant(entry) => {
-                let function = raw::Function {
-                    name_offset: name_idx,
-                    _comp_dir_offset: u32::MAX,
-                    entry_pc: symbol.address as u32,
-                    lang: u32::MAX,
-                };
-                let function_idx = self.functions.insert_full(function).0 as u32;
+        // Insert a source location for the symbol, overwriting `NO_SOURCE_LOCATION` sentinel
+        // values but not actual source locations coming from e.g. functions.
+        insert_source_location(&mut self.ranges, symbol.address as u32, || {
+            let function = raw::Function {
+                name_offset: name_idx,
+                _comp_dir_offset: u32::MAX,
+                entry_pc: symbol.address as u32,
+                lang: u32::MAX,
+            };
+            let function_idx = self.functions.insert_full(function).0 as u32;
 
-                entry.insert(raw::SourceLocation {
-                    file_idx: u32::MAX,
-                    line: 0,
-                    function_idx,
-                    inlined_into_idx: u32::MAX,
-                });
+            raw::SourceLocation {
+                file_idx: u32::MAX,
+                line: 0,
+                function_idx,
+                inlined_into_idx: u32::MAX,
             }
-            btree_map::Entry::Occupied(entry) => {
-                // ASSUMPTION:
-                // the `functions` iterator has already filled in this addr via debug session.
-                // we could trace the caller hierarchy up to the root, and assert that it is
-                // indeed the same function, and maybe update its `entry_pc`, but we don’t do
-                // that for now.
-                let _function_idx = entry.get().function_idx as usize;
-            }
-        }
+        });
 
         let last_addr = self.last_addr.get_or_insert(0);
         if symbol.address as u32 >= *last_addr {
             self.last_addr = None;
+        }
+
+        // Insert an explicit "empty" mapping for the end of the symbol.
+        // This is to ensure that addresses that fall "between" symbols don't get
+        // erroneously mapped to the previous symbol.
+        //
+        // We only do this if there is no previous mapping for the end address—we don't
+        // want to overwrite valid mappings.
+        //
+        // If the next symbol starts right at this symbols's end, that's no trouble,
+        // it will just overwrite this mapping.
+        if symbol.size > 0 {
+            let end_address = (symbol.address + symbol.size) as u32;
+            if let btree_map::Entry::Vacant(vacant_entry) = self.ranges.entry(end_address) {
+                vacant_entry.insert(NO_SOURCE_LOCATION);
+            }
         }
     }
 
@@ -507,6 +531,29 @@ impl<'a> SymCacheConverter<'a> {
     }
 }
 
+/// Inserts a source location into a map, but only if there either isn't already
+/// a value for the provided key or the value is the `NO_SOURCE_LOCATION` sentinel.
+///
+/// This is useful because a `NO_SOURCE_LOCATION` value may be inserted at an address to explicitly
+/// mark the end of a function or symbol. If later there is a function, symbol, or range
+/// starting at that same address, we want to evict that sentinel, but we wouldn't want to
+/// evict source locations carrying actual information.
+fn insert_source_location<K, F>(
+    source_locations: &mut BTreeMap<K, raw::SourceLocation>,
+    key: K,
+    val: F,
+) where
+    K: Ord,
+    F: FnOnce() -> raw::SourceLocation,
+{
+    if source_locations
+        .get(&key)
+        .is_none_or(|sl| *sl == NO_SOURCE_LOCATION)
+    {
+        source_locations.insert(key, val());
+    }
+}
+
 /// Undecorates a Windows C-decorated symbol name.
 ///
 /// The decoration rules are explained here:
@@ -549,4 +596,49 @@ fn undecorate_win_symbol(name: &str) -> &str {
     }
 
     name
+}
+
+/// Returns the start and end address for a line record, clamped to `u32`.
+fn line_boundaries(address: u64, size: Option<u64>) -> (u32, u32) {
+    let start = address.try_into().unwrap_or(u32::MAX);
+    let end = start.saturating_add(size.unwrap_or(1).try_into().unwrap_or(u32::MAX));
+    (start, end)
+}
+
+fn take_if<T>(opt: &mut Option<T>, predicate: impl FnOnce(&mut T) -> bool) -> Option<T> {
+    if opt.as_mut().is_some_and(predicate) {
+        opt.take()
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tests that computing a range with a large size naively
+    /// results in an empty range, but using `line_boundaries`
+    /// doesn't.
+    #[test]
+    fn test_large_range() {
+        // Line record values from an actual example
+        let address = 0x11d255;
+        let size = 0xffee9d55;
+
+        let naive_range = {
+            let start = address as u32;
+            let end = (address + size) as u32;
+            start..end
+        };
+
+        assert!(naive_range.is_empty());
+
+        let range = {
+            let (start, end) = line_boundaries(address, Some(size));
+            start..end
+        };
+
+        assert!(!range.is_empty());
+    }
 }

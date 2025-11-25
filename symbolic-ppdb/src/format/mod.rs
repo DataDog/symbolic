@@ -352,7 +352,7 @@ impl<'data> PortablePdb<'data> {
     /// or the cell is too wide for a `u32`.
     ///
     /// Note that row and column indices are 1-based!
-    pub(crate) fn get_table(&self, table: TableType) -> Result<Table, FormatError> {
+    pub(crate) fn get_table(&self, table: TableType) -> Result<Table<'_>, FormatError> {
         let md_stream = self
             .metadata_stream
             .as_ref()
@@ -362,9 +362,9 @@ impl<'data> PortablePdb<'data> {
 
     /// Returns true if this portable pdb file contains method debug information.
     pub fn has_debug_info(&self) -> bool {
-        self.metadata_stream.as_ref().map_or(false, |md_stream| {
-            md_stream[TableType::MethodDebugInformation].rows > 0
-        })
+        self.metadata_stream
+            .as_ref()
+            .is_some_and(|md_stream| md_stream[TableType::MethodDebugInformation].rows > 0)
     }
 
     /// Get source file referenced by this PDB.
@@ -442,7 +442,7 @@ impl<'object, 'data> EmbeddedSourceIterator<'object, 'data> {
     }
 }
 
-impl<'object, 'data> Iterator for EmbeddedSourceIterator<'object, 'data> {
+impl<'data> Iterator for EmbeddedSourceIterator<'_, 'data> {
     type Item = Result<EmbeddedSource<'data>, FormatError>;
 
     fn next(&mut self) -> Option<Self::Item> {

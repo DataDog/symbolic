@@ -42,14 +42,17 @@
 //! bundle a file entry has a `url` and might carry `headers` or individual debug IDs
 //! per source file.
 
+mod utf8_reader;
+
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
-use std::fmt;
+use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Seek, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::{fmt, io};
 
 use parking_lot::Mutex;
 use regex::Regex;
@@ -59,6 +62,7 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 
 use symbolic_common::{Arch, AsSelf, CodeId, DebugId, SourceLinkMappings};
 
+use self::utf8_reader::Utf8Reader;
 use crate::base::*;
 use crate::js::{
     discover_debug_id, discover_sourcemap_embedded_debug_id, discover_sourcemaps_location,
@@ -84,7 +88,7 @@ lazy_static::lazy_static! {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceBundleErrorKind {
-    /// The source bundle container is damanged.
+    /// The source bundle container is damaged.
     BadZip,
 
     /// An error when reading/writing the manifest.
@@ -550,7 +554,7 @@ impl<'data> SourceBundleIndex<'data> {
             let zip_path = Arc::new(zip_path.clone());
             if !file_info.path.is_empty() {
                 indexed_files.insert(
-                    FileKey::Path(file_info.path.clone().into()),
+                    FileKey::Path(normalize_path(&file_info.path).into()),
                     zip_path.clone(),
                 );
             }
@@ -783,7 +787,7 @@ impl<'data> SourceBundle<'data> {
 impl<'slf, 'data: 'slf> AsSelf<'slf> for SourceBundle<'data> {
     type Ref = SourceBundle<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         unsafe { std::mem::transmute(self) }
     }
 }
@@ -879,7 +883,7 @@ pub struct SourceBundleDebugSession<'data> {
     source_links: SourceLinkMappings,
 }
 
-impl<'data> SourceBundleDebugSession<'data> {
+impl SourceBundleDebugSession<'_> {
     /// Returns an iterator over all source files in this debug file.
     pub fn files(&self) -> SourceBundleFileIterator<'_> {
         SourceBundleFileIterator {
@@ -936,7 +940,7 @@ impl<'data> SourceBundleDebugSession<'data> {
         &self,
         path: &str,
     ) -> Result<Option<SourceFileDescriptor<'_>>, SourceBundleError> {
-        self.get_source_file_descriptor(FileKey::Path(path.into()))
+        self.get_source_file_descriptor(FileKey::Path(normalize_path(path).into()))
     }
 
     /// Like [`source_by_path`](Self::source_by_path) but looks up by URL.
@@ -969,7 +973,7 @@ impl<'data> SourceBundleDebugSession<'data> {
     }
 }
 
-impl<'data, 'session> DebugSession<'session> for SourceBundleDebugSession<'data> {
+impl<'session> DebugSession<'session> for SourceBundleDebugSession<'_> {
     type Error = SourceBundleError;
     type FunctionIterator = SourceBundleFunctionIterator<'session>;
     type FileIterator = SourceBundleFileIterator<'session>;
@@ -990,7 +994,7 @@ impl<'data, 'session> DebugSession<'session> for SourceBundleDebugSession<'data>
 impl<'slf, 'data: 'slf> AsSelf<'slf> for SourceBundleDebugSession<'data> {
     type Ref = SourceBundleDebugSession<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         unsafe { std::mem::transmute(self) }
     }
 }
@@ -1035,13 +1039,47 @@ fn sanitize_bundle_path(path: &str) -> String {
     sanitized
 }
 
+/// Normalizes all paths to follow the Linux standard of using forward slashes.
+fn normalize_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+/// Contains information about a file skipped in the SourceBundleWriter
+#[derive(Debug)]
+pub struct SkippedFileInfo<'a> {
+    path: &'a str,
+    reason: &'a str,
+}
+
+impl<'a> SkippedFileInfo<'a> {
+    fn new(path: &'a str, reason: &'a str) -> Self {
+        Self { path, reason }
+    }
+
+    /// Returns the path of the skipped file.
+    pub fn path(&self) -> &str {
+        self.path
+    }
+
+    /// Get the human-readable reason why the file was skipped
+    pub fn reason(&self) -> &str {
+        self.reason
+    }
+}
+
+impl Display for SkippedFileInfo<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Skipped file {} due to: {}", self.path, self.reason)
+    }
+}
+
 /// Writer to create [`SourceBundles`].
 ///
 /// Writers can either [create a new file] or be created from an [existing file]. Then, use
 /// [`add_file`] to add files and finally call [`finish`] to flush the archive to
 /// the underlying writer.
 ///
-/// Note that dropping the writer
+/// Note that dropping the writer without calling [`finish`] will result in an incomplete bundle.
 ///
 /// ```no_run
 /// # use std::fs::File;
@@ -1070,6 +1108,7 @@ where
     manifest: SourceBundleManifest,
     writer: ZipWriter<W>,
     collect_il2cpp: bool,
+    skipped_file_callback: Box<dyn FnMut(SkippedFileInfo)>,
 }
 
 fn default_file_options() -> SimpleFileOptions {
@@ -1097,6 +1136,7 @@ where
             manifest: SourceBundleManifest::new(),
             writer: ZipWriter::new(writer),
             collect_il2cpp: false,
+            skipped_file_callback: Box::new(|_| ()),
         })
     }
 
@@ -1185,18 +1225,14 @@ where
     pub fn add_file<S, R>(
         &mut self,
         path: S,
-        mut file: R,
+        file: R,
         info: SourceFileInfo,
     ) -> Result<(), SourceBundleError>
     where
         S: AsRef<str>,
         R: Read,
     {
-        let mut buf = String::new();
-
-        if let Err(e) = file.read_to_string(&mut buf) {
-            return Err(SourceBundleError::new(SourceBundleErrorKind::ReadFailed, e));
-        }
+        let mut file_reader = Utf8Reader::new(file);
 
         let full_path = self.file_path(path.as_ref());
         let unique_path = self.unique_path(full_path);
@@ -1204,12 +1240,62 @@ where
         self.writer
             .start_file(unique_path.clone(), default_file_options())
             .map_err(|e| SourceBundleError::new(SourceBundleErrorKind::WriteFailed, e))?;
-        self.writer
-            .write_all(buf.as_bytes())
-            .map_err(|e| SourceBundleError::new(SourceBundleErrorKind::WriteFailed, e))?;
 
-        self.manifest.files.insert(unique_path, info);
-        Ok(())
+        match io::copy(&mut file_reader, &mut self.writer) {
+            Err(e) => {
+                self.writer
+                    .abort_file()
+                    .map_err(|e| SourceBundleError::new(SourceBundleErrorKind::WriteFailed, e))?;
+
+                // ErrorKind::InvalidData is returned by Utf8Reader when the file is not valid UTF-8.
+                let error_kind = match e.kind() {
+                    ErrorKind::InvalidData => SourceBundleErrorKind::ReadFailed,
+                    _ => SourceBundleErrorKind::WriteFailed,
+                };
+
+                Err(SourceBundleError::new(error_kind, e))
+            }
+            Ok(_) => {
+                self.manifest.files.insert(unique_path, info);
+                Ok(())
+            }
+        }
+    }
+
+    /// Calls add_file, and handles any ReadFailed errors by calling the skipped_file_callback.
+    fn add_file_skip_read_failed<S, R>(
+        &mut self,
+        path: S,
+        file: R,
+        info: SourceFileInfo,
+    ) -> Result<(), SourceBundleError>
+    where
+        S: AsRef<str>,
+        R: Read,
+    {
+        let result = self.add_file(&path, file, info);
+
+        if let Err(e) = &result {
+            if e.kind == SourceBundleErrorKind::ReadFailed {
+                let reason = e.to_string();
+                let skipped_info = SkippedFileInfo::new(path.as_ref(), &reason);
+                (self.skipped_file_callback)(skipped_info);
+
+                return Ok(());
+            }
+        }
+
+        result
+    }
+
+    /// Set a callback, which is called for every file that is skipped from being included in the
+    /// source bundle. The callback receives information about the file being skipped.
+    pub fn with_skipped_file_callback(
+        mut self,
+        callback: impl FnMut(SkippedFileInfo) + 'static,
+    ) -> Self {
+        self.skipped_file_callback = Box::new(callback);
+        self
     }
 
     /// Writes a single object into the bundle.
@@ -1297,7 +1383,7 @@ where
                     collect_il2cpp_sources(&source, &mut referenced_files);
                 }
 
-                self.add_file(bundle_path, source.as_slice(), info)?;
+                self.add_file_skip_read_failed(bundle_path, source.as_slice(), info)?;
             }
 
             files_handled.insert(filename);
@@ -1314,7 +1400,7 @@ where
                 info.set_ty(SourceFileType::Source);
                 info.set_path(filename.clone());
 
-                self.add_file(bundle_path, source, info)?;
+                self.add_file_skip_read_failed(bundle_path, source, info)?
             }
         }
 
@@ -1468,6 +1554,50 @@ mod tests {
     fn debugsession_is_sendsync() {
         fn is_sendsync<T: Send + Sync>() {}
         is_sendsync::<SourceBundleDebugSession>();
+    }
+
+    #[test]
+    fn test_normalize_paths() -> Result<(), SourceBundleError> {
+        let mut writer = Cursor::new(Vec::new());
+        let mut bundle = SourceBundleWriter::start(&mut writer)?;
+
+        for filename in &[
+            "C:\\users\\martin\\mydebugfile.cs",
+            "/usr/martin/mydebugfile.h",
+        ] {
+            let mut info = SourceFileInfo::new();
+            info.set_ty(SourceFileType::Source);
+            info.set_path(filename.to_string());
+            bundle.add_file_skip_read_failed(
+                sanitize_bundle_path(filename),
+                &b"somerandomdata"[..],
+                info,
+            )?;
+        }
+
+        bundle.finish()?;
+        let bundle_bytes = writer.into_inner();
+        let bundle = SourceBundle::parse(&bundle_bytes)?;
+
+        let session = bundle.debug_session().unwrap();
+
+        assert!(session
+            .source_by_path("C:\\users\\martin\\mydebugfile.cs")?
+            .is_some());
+        assert!(session
+            .source_by_path("C:/users/martin/mydebugfile.cs")?
+            .is_some());
+        assert!(session
+            .source_by_path("C:\\users\\martin/mydebugfile.cs")?
+            .is_some());
+        assert!(session
+            .source_by_path("/usr/martin/mydebugfile.h")?
+            .is_some());
+        assert!(session
+            .source_by_path("\\usr\\martin\\mydebugfile.h")?
+            .is_some());
+
+        Ok(())
     }
 
     #[test]

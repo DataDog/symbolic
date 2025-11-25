@@ -330,7 +330,7 @@ impl<'d> DwarfLineProgram<'d> {
         }
 
         // Sequences are not guaranteed to be in order.
-        dmsort::sort_by_key(&mut sequences, |x| x.start);
+        sequences.sort_by_key(|x| x.start);
 
         DwarfLineProgram {
             header: state_machine.header().clone(),
@@ -366,7 +366,7 @@ struct UnitRef<'d, 'a> {
     unit: &'a Unit<'d>,
 }
 
-impl<'d, 'a> UnitRef<'d, 'a> {
+impl<'d> UnitRef<'d, '_> {
     /// Resolve the binary value of an attribute.
     #[inline(always)]
     fn slice_value(&self, value: AttributeValue<Slice<'d>>) -> Option<&'d [u8]> {
@@ -996,7 +996,7 @@ struct FunctionsOutput<'a, 'd> {
     pub seen_ranges: &'a mut BTreeSet<(u64, u64)>,
 }
 
-impl<'a, 'd> FunctionsOutput<'a, 'd> {
+impl<'a> FunctionsOutput<'a, '_> {
     pub fn with_seen_ranges(seen_ranges: &'a mut BTreeSet<(u64, u64)>) -> Self {
         Self {
             functions: Vec::new(),
@@ -1097,6 +1097,8 @@ struct DwarfSections<'data> {
     debug_str_offsets: DwarfSectionData<'data, gimli::read::DebugStrOffsets<Slice<'data>>>,
     debug_ranges: DwarfSectionData<'data, gimli::read::DebugRanges<Slice<'data>>>,
     debug_rnglists: DwarfSectionData<'data, gimli::read::DebugRngLists<Slice<'data>>>,
+    debug_macinfo: DwarfSectionData<'data, gimli::read::DebugMacinfo<Slice<'data>>>,
+    debug_macro: DwarfSectionData<'data, gimli::read::DebugMacro<Slice<'data>>>,
 }
 
 impl<'data> DwarfSections<'data> {
@@ -1116,6 +1118,8 @@ impl<'data> DwarfSections<'data> {
             debug_str_offsets: DwarfSectionData::load(dwarf),
             debug_ranges: DwarfSectionData::load(dwarf),
             debug_rnglists: DwarfSectionData::load(dwarf),
+            debug_macinfo: DwarfSectionData::load(dwarf),
+            debug_macro: DwarfSectionData::load(dwarf),
         }
     }
 }
@@ -1156,6 +1160,8 @@ impl<'d> DwarfInfo<'d> {
             debug_str: sections.debug_str.to_gimli(),
             debug_str_offsets: sections.debug_str_offsets.to_gimli(),
             debug_types: Default::default(),
+            debug_macinfo: sections.debug_macinfo.to_gimli(),
+            debug_macro: sections.debug_macro.to_gimli(),
             locations: Default::default(),
             ranges: RangeLists::new(
                 sections.debug_ranges.to_gimli(),
@@ -1230,7 +1236,7 @@ impl<'d> DwarfInfo<'d> {
     }
 
     /// Returns an iterator over all compilation units.
-    fn units(&'d self, bcsymbolmap: Option<&'d BcSymbolMap<'d>>) -> DwarfUnitIterator<'_> {
+    fn units(&'d self, bcsymbolmap: Option<&'d BcSymbolMap<'d>>) -> DwarfUnitIterator<'d> {
         DwarfUnitIterator {
             info: self,
             bcsymbolmap,
@@ -1242,7 +1248,7 @@ impl<'d> DwarfInfo<'d> {
 impl<'slf, 'd: 'slf> AsSelf<'slf> for DwarfInfo<'d> {
     type Ref = DwarfInfo<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         unsafe { std::mem::transmute(self) }
     }
 }
@@ -1356,7 +1362,7 @@ impl<'data> DwarfDebugSession<'data> {
     }
 }
 
-impl<'data, 'session> DebugSession<'session> for DwarfDebugSession<'data> {
+impl<'session> DebugSession<'session> for DwarfDebugSession<'_> {
     type Error = DwarfError;
     type FunctionIterator = DwarfFunctionIterator<'session>;
     type FileIterator = DwarfFileIterator<'session>;
@@ -1487,3 +1493,23 @@ impl<'s> Iterator for DwarfFunctionIterator<'s> {
 }
 
 impl std::iter::FusedIterator for DwarfFunctionIterator<'_> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::macho::MachObject;
+
+    #[cfg(feature = "macho")]
+    #[test]
+    fn test_loads_debug_str_offsets() {
+        // File generated using dsymutil
+
+        let data = std::fs::read("tests/fixtures/helloworld").unwrap();
+
+        let obj = MachObject::parse(&data).unwrap();
+
+        let sections = DwarfSections::from_dwarf(&obj);
+        assert_eq!(sections.debug_str_offsets.data.len(), 48);
+    }
+}

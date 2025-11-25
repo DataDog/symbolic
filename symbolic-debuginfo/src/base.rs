@@ -235,7 +235,7 @@ pub struct Symbol<'data> {
     pub size: u64,
 }
 
-impl<'data> Symbol<'data> {
+impl Symbol<'_> {
     /// Returns the name of this symbol as string.
     pub fn name(&self) -> Option<&str> {
         self.name.as_ref().map(Cow::as_ref)
@@ -251,7 +251,7 @@ impl<'data> Symbol<'data> {
     }
 }
 
-impl<'d> fmt::Debug for Symbol<'d> {
+impl fmt::Debug for Symbol<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Symbol")
             .field("name", &self.name().unwrap_or("<unknown>"))
@@ -351,7 +351,7 @@ impl<'data> SymbolMap<'data> {
         let end = match range.end_bound() {
             Bound::Included(end) => *end,
             Bound::Excluded(end) => *end - 1,
-            Bound::Unbounded => u64::max_value(),
+            Bound::Unbounded => u64::MAX,
         };
 
         if end <= start || symbol.contains(end) {
@@ -413,7 +413,7 @@ impl<'d> From<Vec<Symbol<'d>>> for SymbolMap<'d> {
             //
             // Inlined functions will generally not appear in this list, unless they _also_ have an
             // explicit function body, in which case they will have a unique address, again.
-            dmsort::sort_by_key(&mut symbols, Self::key);
+            symbols.sort_by_key(Self::key);
 
             // Compute sizes of consecutive symbols if the size has not been provided by the symbol
             // iterator. In the same go, drop all but the first symbols at any given address. We do
@@ -597,7 +597,7 @@ pub struct LineInfo<'data> {
 
 #[cfg(test)]
 impl LineInfo<'static> {
-    pub(crate) fn new(address: u64, size: u64, file: &[u8], line: u64) -> LineInfo {
+    pub(crate) fn new(address: u64, size: u64, file: &[u8], line: u64) -> LineInfo<'_> {
         LineInfo {
             address,
             size: Some(size),

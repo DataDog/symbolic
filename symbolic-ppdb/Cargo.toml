@@ -1,6 +1,6 @@
 [package]
 name = "symbolic-ppdb"
-version = "12.9.2-dd"
+version = "12.17.0-dd"
 license = "MIT"
 authors = [
     "Sebastian Zivota <sebastian.zivota@sentry.io>",
@@ -12,7 +12,8 @@ repository = "https://github.com/getsentry/symbolic"
 description = """
 A library for parsing and performing lookups on Portable PDB files.
 """
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 
 exclude = ["tests/**/*"]
 
@@ -24,7 +25,7 @@ flate2 = { workspace = true }
 indexmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-symbolic-common = { version = "12.9.2-dd", path = "../symbolic-common" }
+symbolic-common = { version = "12.17.0-dd", path = "../symbolic-common" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 watto = { workspace = true }

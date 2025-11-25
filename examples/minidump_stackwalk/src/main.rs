@@ -41,42 +41,7 @@ struct ObjectDatabase {
     by_code_id: HashMap<CodeId, Vec<ObjectMetadata>>,
 }
 
-/// Metadata about an object in the filesystem.
-#[derive(Debug, Clone)]
-struct ObjectMetadata {
-    /// The object's path.
-    path: PathBuf,
-    /// The object's index in its archive.
-    index_in_archive: usize,
-    /// Whether the object has unwind info.
-    has_unwind_info: bool,
-    /// Whether the object has symbol info.
-    has_symbol_info: bool,
-}
-
-/// A SymbolProvider that recursively searches a given path for symbol files.
-struct LocalSymbolProvider<'a> {
-    object_files: ObjectDatabase,
-    cfi_files: Mutex<CfiFiles>,
-    symcaches: Mutex<SymCaches<'a>>,
-    use_cfi: bool,
-    symbolicate: bool,
-}
-
-impl<'a> LocalSymbolProvider<'a> {
-    /// Constructs a `LocalSymbolProvider` that will look for symbol files under the given path.
-    fn new<P: AsRef<Path>>(path: Option<P>, use_cfi: bool, symbolicate: bool) -> Self {
-        Self {
-            object_files: path.map_or(Default::default(), |path| {
-                Self::create_object_database(path)
-            }),
-            cfi_files: Mutex::new(BTreeMap::default()),
-            symcaches: Mutex::new(SymCaches::default()),
-            use_cfi,
-            symbolicate,
-        }
-    }
-
+impl ObjectDatabase {
     /// Accumulates a database of objects found under the given path.
     ///
     /// The objects are saved in a map from `DebugId`s to vectors of
@@ -86,11 +51,11 @@ impl<'a> LocalSymbolProvider<'a> {
     /// * whether the object has unwind info
     /// * whether the object has symbol info
     #[tracing::instrument(skip_all, fields(path = ?path.as_ref()))]
-    fn create_object_database(path: impl AsRef<Path>) -> ObjectDatabase {
+    fn from_path(path: impl AsRef<Path>) -> ObjectDatabase {
         let mut object_db = ObjectDatabase::default();
         for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
             // Folders will be recursed into automatically
-            if !entry.metadata().map_or(false, |md| md.is_file()) {
+            if !entry.metadata().is_ok_and(|md| md.is_file()) {
                 continue;
             }
 
@@ -149,6 +114,58 @@ impl<'a> LocalSymbolProvider<'a> {
         object_db
     }
 
+    /// Merges another [`ObjectDatabase`] into the current one.
+    fn merge(mut self, other: Self) -> Self {
+        let Self {
+            by_debug_id,
+            by_code_id,
+        } = other;
+
+        self.by_debug_id.extend(by_debug_id);
+        self.by_code_id.extend(by_code_id);
+
+        self
+    }
+}
+
+/// Metadata about an object in the filesystem.
+#[derive(Debug, Clone)]
+struct ObjectMetadata {
+    /// The object's path.
+    path: PathBuf,
+    /// The object's index in its archive.
+    index_in_archive: usize,
+    /// Whether the object has unwind info.
+    has_unwind_info: bool,
+    /// Whether the object has symbol info.
+    has_symbol_info: bool,
+}
+
+/// A SymbolProvider that recursively searches a given path for symbol files.
+struct LocalSymbolProvider<'a> {
+    object_files: ObjectDatabase,
+    cfi_files: Mutex<CfiFiles>,
+    symcaches: Mutex<SymCaches<'a>>,
+    use_cfi: bool,
+    symbolicate: bool,
+}
+
+impl<'a> LocalSymbolProvider<'a> {
+    /// Constructs a `LocalSymbolProvider` that will look for symbol files under the given path.
+    fn new<P: AsRef<Path>>(path: &[P], use_cfi: bool, symbolicate: bool) -> Self {
+        Self {
+            object_files: path
+                .iter()
+                .map(ObjectDatabase::from_path)
+                .reduce(ObjectDatabase::merge)
+                .unwrap_or_default(),
+            cfi_files: Mutex::new(BTreeMap::default()),
+            symcaches: Mutex::new(SymCaches::default()),
+            use_cfi,
+            symbolicate,
+        }
+    }
+
     /// Fetches the [`ObjectMetadata`] for the given id, using the [`DebugId`] or the [`CodeId`]
     /// as fallback.
     fn object_info(&self, id: LookupId) -> Option<&Vec<ObjectMetadata>> {
@@ -172,6 +189,8 @@ impl<'a> LocalSymbolProvider<'a> {
     /// Objects which have unwind information are then tried in order.
     #[tracing::instrument(skip_all, fields(id = ?id))]
     fn load_cfi(&self, id: LookupId) -> Result<SymbolFile, SymbolError> {
+        tracing::info!("loading cficache");
+
         let object_list = self.object_info(id).ok_or(SymbolError::NotFound)?;
         let mut found = None;
         for object_meta in object_list.iter().filter(|object| object.has_unwind_info) {
@@ -218,6 +237,8 @@ impl<'a> LocalSymbolProvider<'a> {
         &self,
         id: LookupId,
     ) -> Result<SelfCell<ByteView<'a>, SymCache<'a>>, SymbolError> {
+        tracing::info!("loading symcache");
+
         let object_list = self.object_info(id).ok_or(SymbolError::NotFound)?;
         let mut found = None;
         for object_meta in object_list.iter().filter(|object| object.has_symbol_info) {
@@ -262,7 +283,7 @@ impl<'a> LocalSymbolProvider<'a> {
 }
 
 #[async_trait]
-impl<'a> minidump_unwind::SymbolProvider for LocalSymbolProvider<'a> {
+impl minidump_unwind::SymbolProvider for LocalSymbolProvider<'_> {
     #[tracing::instrument(
         skip(self, module, frame),
         fields(module.id, frame.instruction = frame.get_instruction())
@@ -272,22 +293,44 @@ impl<'a> minidump_unwind::SymbolProvider for LocalSymbolProvider<'a> {
         module: &(dyn Module + Sync),
         frame: &mut (dyn FrameSymbolizer + Send),
     ) -> Result<(), FillSymbolError> {
-        if !self.symbolicate {
-            return Err(FillSymbolError {});
-        }
-
         let id = (
             module.code_identifier(),
             module.debug_identifier().unwrap_or_default(),
         );
         tracing::Span::current().record("module.id", tracing::field::debug(&id));
 
+        let instruction = frame.get_instruction();
+
+        let mut cfi = self.cfi_files.lock().unwrap();
+        if let Ok(symbol_file) = cfi
+            .entry(id.clone())
+            .or_insert_with(|| self.load_cfi(id.clone()))
+        {
+            // Validity check that the instruction provided points to a valid stack frame.
+            //
+            // This is similar to the lookup check below for symcache symbol info.
+            // If we can already filter out instructions which are definitely not valid,
+            // we can help the stack walker not hallucinate frames which do not exist.
+            //
+            // Returning here without providing any symbol info, will cause the stack walker
+            // to skip the frame. An error will hallucinate a frame.
+            let cfi_stack_info = symbol_file
+                .cfi_stack_info
+                .get(instruction - module.base_address());
+            if cfi_stack_info.is_none() {
+                return Ok(());
+            }
+        };
+
+        if !self.symbolicate {
+            return Err(FillSymbolError {});
+        }
+
         let mut symcaches = self.symcaches.lock().unwrap();
 
-        let symcache = symcaches.entry(id.clone()).or_insert_with(|| {
-            tracing::info!("loading symcache for the first time");
-            self.load_symbol_info(id)
-        });
+        let symcache = symcaches
+            .entry(id.clone())
+            .or_insert_with(|| self.load_symbol_info(id));
 
         let symcache = match symcache {
             Ok(symcache) => symcache,
@@ -299,12 +342,22 @@ impl<'a> minidump_unwind::SymbolProvider for LocalSymbolProvider<'a> {
 
         tracing::info!("symcache successfully loaded");
 
-        let instruction = frame.get_instruction();
-        let source_location = symcache
+        let Some(source_location) = symcache
             .get()
             .lookup(instruction - module.base_address())
             .last()
-            .ok_or(FillSymbolError {})?;
+        else {
+            // The instruction definitely belongs to this module, but we cannot
+            // find the instruction. In which case this is most likely not a real
+            // frame.
+            //
+            // The Minidump stack-walker skips all frames without a name and continues
+            // the search, but it assumes there is a correct frame if the lookup
+            // fails. To not hallucinate frames, we return `Ok(())` here (a frame without a name).
+            //
+            // See also above, the cfi validity check.
+            return Ok(());
+        };
 
         frame.set_function(
             source_location.function().name(),
@@ -341,10 +394,7 @@ impl<'a> minidump_unwind::SymbolProvider for LocalSymbolProvider<'a> {
 
         let mut cfi = self.cfi_files.lock().unwrap();
 
-        let symbol_file = cfi.entry(id.clone()).or_insert_with(|| {
-            tracing::info!("loading cficache for the first time");
-            self.load_cfi(id)
-        });
+        let symbol_file = cfi.entry(id.clone()).or_insert_with(|| self.load_cfi(id));
 
         match symbol_file {
             Ok(file) => {
@@ -486,10 +536,7 @@ impl fmt::Display for Report<'_> {
         };
 
         for (ti, thread) in self.process_state.threads.iter().enumerate() {
-            let crashed = self
-                .process_state
-                .requesting_thread
-                .map_or(false, |i| ti == i);
+            let crashed = self.process_state.requesting_thread == Some(ti);
 
             if self.options.crashed_only && !crashed {
                 continue;
@@ -613,10 +660,13 @@ impl fmt::Display for Report<'_> {
 
 async fn execute(matches: &ArgMatches) -> Result<(), Error> {
     let minidump_path = matches.get_one::<PathBuf>("minidump_file_path").unwrap();
-    let symbols_path = matches.get_one::<PathBuf>("debug_symbols_path");
+    let symbols_path = matches
+        .get_many::<PathBuf>("debug_symbols_path")
+        .map(|s| s.collect::<Vec<_>>())
+        .unwrap_or_default();
 
     let symbol_provider = LocalSymbolProvider::new(
-        symbols_path,
+        &symbols_path,
         *matches.get_one("cfi").unwrap(),
         *matches.get_one("symbolize").unwrap(),
     );
@@ -658,6 +708,7 @@ async fn main() {
         )
         .arg(
             Arg::new("debug_symbols_path")
+                .action(ArgAction::Append)
                 .value_name("symbols")
                 .value_parser(value_parser!(PathBuf))
                 .help("Path to a folder containing debug symbols"),

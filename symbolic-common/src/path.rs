@@ -54,7 +54,7 @@ fn is_windows_driveletter<P: AsRef<[u8]>>(path: P) -> bool {
 
     if let (Some(drive_letter), Some(b':')) = (path.first(), path.get(1)) {
         if drive_letter.is_ascii_alphabetic() {
-            return path.get(2).map_or(true, is_windows_separator);
+            return path.get(2).is_none_or(is_windows_separator);
         }
     }
 
@@ -69,11 +69,11 @@ fn is_absolute_windows_path<P: AsRef<[u8]>>(path: P) -> bool {
 
 /// Returns `true`
 fn is_semi_absolute_windows_path<P: AsRef<[u8]>>(path: P) -> bool {
-    path.as_ref().first().map_or(false, is_windows_separator)
+    path.as_ref().first().is_some_and(is_windows_separator)
 }
 
 fn is_absolute_unix_path<P: AsRef<[u8]>>(path: P) -> bool {
-    path.as_ref().first().map_or(false, is_unix_separator)
+    path.as_ref().first().is_some_and(is_unix_separator)
 }
 
 fn is_windows_path<P: AsRef<[u8]>>(path: P) -> bool {

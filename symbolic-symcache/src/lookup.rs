@@ -91,7 +91,7 @@ pub struct File<'data> {
     name: &'data str,
 }
 
-impl<'data> File<'data> {
+impl File<'_> {
     /// Returns this file's full path.
     pub fn full_path(&self) -> String {
         let comp_dir = self.comp_dir.unwrap_or_default();
@@ -135,7 +135,7 @@ impl<'data> Function<'data> {
     }
 }
 
-impl<'data> Default for Function<'data> {
+impl Default for Function<'_> {
     fn default() -> Self {
         Self {
             name: "?",
@@ -155,7 +155,7 @@ pub struct SourceLocation<'data, 'cache> {
     pub(crate) source_location: &'data raw::SourceLocation,
 }
 
-impl<'data, 'cache> SourceLocation<'data, 'cache> {
+impl<'data> SourceLocation<'data, '_> {
     /// The source line corresponding to the instruction.
     ///
     /// 0 denotes an unknown line number.
@@ -228,10 +228,11 @@ impl<'data> Iterator for Functions<'data> {
             }
         }
 
-        function.map(|f| {
+        if function.is_some() {
             self.function_idx += 1;
-            f
-        })
+        }
+
+        function
     }
 }
 
@@ -266,10 +267,11 @@ impl<'data> Iterator for Files<'data> {
     type Item = File<'data>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.cache.get_file(self.file_idx).map(|f| {
+        let file = self.cache.get_file(self.file_idx);
+        if file.is_some() {
             self.file_idx += 1;
-            f
-        })
+        }
+        file
     }
 }
 

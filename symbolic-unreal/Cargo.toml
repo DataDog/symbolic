@@ -1,6 +1,6 @@
 [package]
 name = "symbolic-unreal"
-version = "12.9.2-dd"
+version = "12.17.0-dd"
 license = "MIT"
 authors = [
     "Armin Ronacher <armin.ronacher@active-4.com>",
@@ -13,7 +13,8 @@ repository = "https://github.com/getsentry/symbolic"
 description = """
 Parsing and processing utilities for Unreal Engine 4 crash files.
 """
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 
 exclude = ["tests/**/*"]
 

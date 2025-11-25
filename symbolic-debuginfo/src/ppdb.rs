@@ -26,7 +26,7 @@ pub struct PortablePdbObject<'data> {
 
 impl<'data> PortablePdbObject<'data> {
     /// Returns the Portable PDB contained in this object.
-    pub fn portable_pdb(&self) -> &PortablePdb {
+    pub fn portable_pdb(&self) -> &PortablePdb<'_> {
         &self.ppdb
     }
 
@@ -214,7 +214,7 @@ impl<'data> PortablePdbDebugSession<'data> {
     }
 }
 
-impl<'data, 'session> DebugSession<'session> for PortablePdbDebugSession<'data> {
+impl<'session> DebugSession<'session> for PortablePdbDebugSession<'_> {
     type Error = FormatError;
     type FunctionIterator = PortablePdbFunctionIterator<'session>;
     type FileIterator = PortablePdbFileIterator<'session>;
