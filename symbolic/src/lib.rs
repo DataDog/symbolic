@@ -74,8 +74,8 @@ pub use symbolic_il2cpp as il2cpp;
 #[cfg(feature = "ppdb")]
 pub use symbolic_ppdb as ppdb;
 #[doc(inline)]
-#[cfg(feature = "sourcemapcache")]
-pub use symbolic_sourcemapcache as sourcemapcache;
+// #[cfg(feature = "sourcemapcache")]
+// pub use symbolic_sourcemapcache as sourcemapcache;
 #[doc(inline)]
 #[cfg(feature = "symcache")]
 pub use symbolic_symcache as symcache;

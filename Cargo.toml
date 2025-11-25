@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["symbolic*", "examples/*"]
+exclude = [
+    "symbolic-sourcemapcache",
+    "examples/sourcemapcache_debug",
+]
 
 [workspace.package]
 edition = "2021"
