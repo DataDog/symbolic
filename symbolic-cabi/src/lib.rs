@@ -13,7 +13,7 @@ mod demangle;
 mod il2cpp;
 mod proguard;
 mod sourcemap;
-//mod sourcemapcache;
+mod sourcemapcache;
 mod symcache;
 
 pub use crate::cfi::*;
@@ -24,5 +24,5 @@ pub use crate::demangle::*;
 pub use crate::il2cpp::*;
 pub use crate::proguard::*;
 pub use crate::sourcemap::*;
-//pub use crate::sourcemapcache::*;
+pub use crate::sourcemapcache::*;
 pub use crate::symcache::*;
