@@ -1103,8 +1103,9 @@ checksum = "72167d68f5fce3b8655487b8038691a3c9984ee769590f93f2a631f4ad64e4f5"
 
 [[package]]
 name = "js-source-scopes"
-version = "0.6.0"
-source = "git+https://github.com/getsentry/js-source-scopes?branch=master#abea51a0e74840a8d1ec96a61ff36b488994f68c"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "632e077b0fb37f6476d2fa0e15ee97afcfc2359a1a68b1990d4fa9f82324e3f0"
 dependencies = [
  "indexmap",
  "sourcemap",
