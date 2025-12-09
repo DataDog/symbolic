@@ -16,6 +16,7 @@ use pdb_addr2line::pdb::{
 };
 use pdb_addr2line::ModuleProvider;
 use smallvec::SmallVec;
+use srcsrv;
 use thiserror::Error;
 
 use symbolic_common::{
@@ -251,6 +252,31 @@ impl<'data> PdbObject<'data> {
         false
     }
 
+    /// Returns the SRCSRV VCS integration name if available.
+    ///
+    /// This extracts the version control system identifier from the SRCSRV stream,
+    /// if present. Common values include "perforce", "tfs", "git", etc.
+    /// Returns `None` if no SRCSRV stream exists or if it cannot be parsed.
+    pub fn srcsrv_vcs_name(&self) -> Option<String> {
+        let mut pdb = self.pdb.write();
+
+        // Try to open the "srcsrv" named stream
+        let stream = match pdb.named_stream(b"srcsrv") {
+            Ok(stream) => stream,
+            Err(_) => return None,
+        };
+
+        // Parse the stream to extract VCS name
+        let stream_data = stream.as_slice();
+        if let Ok(parsed_stream) = srcsrv::SrcSrvStream::parse(stream_data) {
+            parsed_stream
+                .version_control_description()
+                .map(|s| s.to_string())
+        } else {
+            None
+        }
+    }
+
     /// Determines whether this object is malformed and was only partially parsed
     pub fn is_malformed(&self) -> bool {
         false
@@ -298,7 +324,7 @@ impl fmt::Debug for PdbObject<'_> {
 impl<'slf, 'data: 'slf> AsSelf<'slf> for PdbObject<'data> {
     type Ref = PdbObject<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         unsafe { std::mem::transmute(self) }
     }
 }
@@ -434,7 +460,7 @@ pub struct PdbSymbolIterator<'data, 'object> {
     executable_sections: &'object ExecutableSections,
 }
 
-impl<'data, 'object> Iterator for PdbSymbolIterator<'data, 'object> {
+impl<'data> Iterator for PdbSymbolIterator<'data, '_> {
     type Item = Symbol<'data>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -565,7 +591,7 @@ impl<'d> PdbDebugInfo<'d> {
     }
 
     /// Returns an iterator over all compilation units (modules).
-    fn units(&'d self) -> PdbUnitIterator<'_> {
+    fn units(&'d self) -> PdbUnitIterator<'d> {
         PdbUnitIterator {
             debug_info: self,
             index: 0,
@@ -576,7 +602,7 @@ impl<'d> PdbDebugInfo<'d> {
         self.type_formatter.modules()
     }
 
-    fn get_module(&'d self, index: usize) -> Result<Option<&ModuleInfo<'_>>, PdbError> {
+    fn get_module(&'d self, index: usize) -> Result<Option<&'d ModuleInfo<'d>>, PdbError> {
         // Silently ignore module references out-of-bound
         let module = match self.modules().get(index) {
             Some(module) => module,
@@ -599,7 +625,7 @@ impl<'d> PdbDebugInfo<'d> {
 impl<'slf, 'd: 'slf> AsSelf<'slf> for PdbDebugInfo<'d> {
     type Ref = PdbDebugInfo<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         unsafe { std::mem::transmute(self) }
     }
 }
@@ -746,6 +772,7 @@ impl<'s> Unit<'s> {
     /// For example we have observed in a real-world pdb that has:
     /// - A function 0x33ea50 (size 0xc)
     /// - With one line record: 0x33e850 (size 0x26)
+    ///
     /// The line record is completely outside the range of the function.
     fn sanitize_lines(func: &mut Function) {
         let fn_start = func.address;
@@ -905,7 +932,7 @@ impl<'s> Unit<'s> {
             if symbol.ends_scope() {
                 depth -= 1;
 
-                if proc_offsets.last().map_or(false, |&(d, _)| d >= depth) {
+                if proc_offsets.last().is_some_and(|&(d, _)| d >= depth) {
                     proc_offsets.pop();
                 }
             }

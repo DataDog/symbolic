@@ -3,8 +3,8 @@
 use super::WasmError;
 use crate::base::{ObjectKind, Symbol};
 use wasmparser::{
-    BinaryReader, CompositeType, FuncValidatorAllocations, NameSectionReader, Payload, TypeRef,
-    Validator, WasmFeatures,
+    BinaryReader, CompositeInnerType, FuncValidatorAllocations, NameSectionReader, Payload,
+    TypeRef, Validator, WasmFeatures,
 };
 
 #[derive(Default)]
@@ -20,7 +20,7 @@ impl BitVec {
 
     pub fn resize(&mut self, count: usize, value: bool) {
         self.data.resize(
-            (count + u64::BITS as usize - 1) / u64::BITS as usize,
+            count.div_ceil(u64::BITS as usize),
             if value { u64::MAX } else { u64::MIN },
         );
         self.len = count;
@@ -43,7 +43,7 @@ impl BitVec {
         } else {
             let vec_index = index / u64::BITS as usize;
             let item_bit = index % u64::BITS as usize;
-            Some(self.data[vec_index] & 1 << item_bit != 0)
+            Some(self.data[vec_index] & (1 << item_bit) != 0)
         }
     }
 }
@@ -83,8 +83,8 @@ impl<'data> super::WasmObject<'data> {
                     for (i, ty) in tsr.into_iter().enumerate() {
                         let mut types = ty?.into_types();
                         let ty_is_func = matches!(
-                            types.next().map(|s| s.composite_type),
-                            Some(CompositeType::Func(_))
+                            types.next().map(|s| s.composite_type.inner),
+                            Some(CompositeInnerType::Func(_))
                         );
                         if types.next().is_none() && ty_is_func {
                             func_sigs.set(i, true);

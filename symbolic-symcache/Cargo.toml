@@ -1,6 +1,6 @@
 [package]
 name = "symbolic-symcache"
-version = "12.9.2-dd"
+version = "12.17.0-dd"
 license = "MIT"
 authors = [
     "Armin Ronacher <armin.ronacher@active-4.com>",
@@ -13,7 +13,8 @@ description = """
 An optimized cache file for fast and memory efficient lookup of symbols and
 stack frames in debugging information.
 """
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 
 exclude = ["tests/**/*"]
 
@@ -22,9 +23,9 @@ all-features = true
 
 [dependencies]
 indexmap = { workspace = true }
-symbolic-common = { version = "12.9.2-dd", path = "../symbolic-common" }
-symbolic-debuginfo = { version = "12.9.2-dd", path = "../symbolic-debuginfo" }
-symbolic-il2cpp = { version = "12.9.2-dd", path = "../symbolic-il2cpp", optional = true }
+symbolic-common = { version = "12.17.0-dd", path = "../symbolic-common" }
+symbolic-debuginfo = { version = "12.17.0-dd", path = "../symbolic-debuginfo" }
+symbolic-il2cpp = { version = "12.17.0-dd", path = "../symbolic-il2cpp", optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 watto = { workspace = true }

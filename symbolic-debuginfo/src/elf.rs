@@ -76,7 +76,7 @@ impl<'data> ElfObject<'data> {
     /// Tests whether the buffer could contain an ELF object.
     pub fn test(data: &[u8]) -> bool {
         data.get(0..elf::header::SELFMAG)
-            .map_or(false, |data| data == elf::header::ELFMAG)
+            .is_some_and(|data| data == elf::header::ELFMAG)
     }
 
     // Pulled from https://github.com/m4b/goblin/blob/master/src/elf/mod.rs#L393-L424 as it
@@ -291,6 +291,30 @@ impl<'data> ElfObject<'data> {
                 return_partial_on_err!(elf::Symtab::parse(data, dyn_info.symtab, num_syms, ctx));
         }
 
+        // If the dynamic symbol table is empty, try finding a SHT_DYNSYM section in the section headers.
+        // See https://refspecs.linuxfoundation.org/LSB_2.1.0/LSB-Core-generic/LSB-Core-generic/elftypes.html:
+        //
+        // > This section holds a minimal set of symbols adequate for dynamic linking. See also SHT_SYMTAB. Currently, an object file may have either a section of SHT_SYMTAB type or a section of SHT_DYNSYM type, but not both.
+        if obj.dynsyms.is_empty() {
+            if let Some(shdr) = obj
+                .section_headers
+                .iter()
+                .find(|h| h.sh_type == elf::section_header::SHT_DYNSYM)
+            {
+                let size = shdr.sh_entsize;
+                let count = if size == 0 { 0 } else { shdr.sh_size / size };
+                obj.dynsyms = return_partial_on_err!(elf::Symtab::parse(
+                    data,
+                    shdr.sh_offset as usize,
+                    count as usize,
+                    ctx
+                ));
+
+                obj.dynstrtab =
+                    return_partial_on_err!(get_strtab(&obj.section_headers, shdr.sh_link as usize));
+            }
+        }
+
         obj.shdr_relocs = vec![];
         for (idx, section) in obj.section_headers.iter().enumerate() {
             let is_rela = section.sh_type == elf::section_header::SHT_RELA;
@@ -356,7 +380,7 @@ impl<'data> ElfObject<'data> {
     ///
     /// - None if there is no gnu_debuglink section
     /// - DebugLinkError if this section exists, but is malformed
-    pub fn debug_link(&self) -> Result<Option<DebugLink>, DebugLinkError> {
+    pub fn debug_link(&self) -> Result<Option<DebugLink<'_>>, DebugLinkError<'_>> {
         self.section("gnu_debuglink")
             .map(|section| DebugLink::from_data(section.data, self.endianity()))
             .transpose()
@@ -746,7 +770,7 @@ impl fmt::Debug for ElfObject<'_> {
 impl<'slf, 'data: 'slf> AsSelf<'slf> for ElfObject<'data> {
     type Ref = ElfObject<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         self
     }
 }
@@ -863,7 +887,7 @@ pub struct ElfSymbolIterator<'data, 'object> {
     load_addr: u64,
 }
 
-impl<'data, 'object> Iterator for ElfSymbolIterator<'data, 'object> {
+impl<'data> Iterator for ElfSymbolIterator<'data, '_> {
     type Item = Symbol<'data>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -891,7 +915,7 @@ impl<'data, 'object> Iterator for ElfSymbolIterator<'data, 'object> {
                 };
 
                 // We are only interested in symbols pointing into sections with executable flag.
-                if !section.map_or(false, |header| header.is_executable()) {
+                if !section.is_some_and(|header| header.is_executable()) {
                     continue;
                 }
 
@@ -939,6 +963,7 @@ impl<'data> DebugLink<'data> {
     /// - A filename, with any leading directory components removed, followed by a zero byte,
     /// - zero to three bytes of padding, as needed to reach the next four-byte boundary within the section, and
     /// - a four-byte CRC checksum, stored in the same endianness used for the executable file itself.
+    ///
     /// (from <https://sourceware.org/gdb/current/onlinedocs/gdb/Separate-Debug-Files.html#index-_002egnu_005fdebuglink-sections>)
     ///
     /// # Errors

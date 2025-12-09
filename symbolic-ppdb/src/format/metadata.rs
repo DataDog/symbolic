@@ -128,7 +128,7 @@ pub struct Table<'data> {
     contents: &'data [u8],
 }
 
-impl<'data> fmt::Debug for Table<'data> {
+impl fmt::Debug for Table<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let cols: Vec<usize> = self
             .columns
@@ -216,7 +216,7 @@ impl<'data> Table<'data> {
     /// Returns the the bytes of the `idx`th row, if any.
     ///
     /// Note that table row indices are 1-based!
-    pub(crate) fn get_row(&self, idx: usize) -> Result<Row, FormatError> {
+    pub(crate) fn get_row(&self, idx: usize) -> Result<Row<'_>, FormatError> {
         idx.checked_sub(1)
             .and_then(|idx| self.contents.get(idx * self.width..(idx + 1) * self.width))
             .map(|data| Row { data, table: self })
@@ -231,7 +231,7 @@ pub(crate) struct Row<'data> {
     table: &'data Table<'data>,
 }
 
-impl<'data> Row<'data> {
+impl Row<'_> {
     /// Reads the `col` cell in the given table as a `u32`.
     ///
     /// This returns an error if the indices are out of bounds for the table
@@ -354,7 +354,7 @@ impl<'data> MetadataStream<'data> {
             contents: <&[u8]>::default(),
         }; 64];
         for (i, table) in tables.iter_mut().enumerate() {
-            if (header.valid_tables >> i & 1) == 0 {
+            if ((header.valid_tables >> i) & 1) == 0 {
                 continue;
             }
 
@@ -861,7 +861,7 @@ impl<'data> Index<TableType> for MetadataStream<'data> {
     }
 }
 
-impl<'data> IndexMut<TableType> for MetadataStream<'data> {
+impl IndexMut<TableType> for MetadataStream<'_> {
     fn index_mut(&mut self, index: TableType) -> &mut Self::Output {
         &mut self.tables[index as usize]
     }
@@ -910,7 +910,7 @@ macro_rules! ok_or_return {
     };
 }
 
-impl<'data> Iterator for CustomDebugInformationIterator<'data> {
+impl Iterator for CustomDebugInformationIterator<'_> {
     type Item = Result<CustomDebugInformation, FormatError>;
 
     fn next(&mut self) -> Option<Self::Item> {

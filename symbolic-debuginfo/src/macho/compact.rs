@@ -272,7 +272,7 @@
 //! (subtract the global count to get the local index).
 //!
 //! > Unclear detail: If the global palette is smaller than 127, can the local
-//!   palette be larger than 128?
+//! > palette be larger than 128?
 //!
 //! To compress these entries into a single 32-bit value, the address is truncated
 //! to 24 bits and packed with the index. The addresses stored in these entries
@@ -2103,10 +2103,9 @@ mod test {
     const COMPRESSED_PAGE_KIND: u32 = 3;
 
     fn align(offset: u32, align: u32) -> u32 {
-        // Adding `align - 1` to a value push unaligned values to the next multiple,
-        // and integer division + multiplication can then remove the remainder.
-        ((offset + align - 1) / align) * align
+        offset.div_ceil(align) * align
     }
+
     fn pack_x86_rbp_registers(regs: [u8; 5]) -> u32 {
         let mut result: u32 = 0;
         let base_offset = 0;
@@ -2505,7 +2504,7 @@ mod test {
             let opcode = Opcode(
                 X86_MODE_RBP_FRAME
                     | pack_x86_rbp_registers(registers)
-                    | (stack_size as u32) << stack_size_offset,
+                    | ((stack_size as u32) << stack_size_offset),
             );
             let expected = vec![
                 CompactCfiOp::RegisterIs {
@@ -2537,7 +2536,7 @@ mod test {
             let opcode = Opcode(
                 X86_MODE_RBP_FRAME
                     | pack_x86_rbp_registers(registers)
-                    | (stack_size as u32) << stack_size_offset,
+                    | ((stack_size as u32) << stack_size_offset),
             );
             let expected = vec![
                 CompactCfiOp::RegisterIs {
@@ -2574,7 +2573,7 @@ mod test {
             let opcode = Opcode(
                 X86_MODE_RBP_FRAME
                     | pack_x86_rbp_registers(registers)
-                    | (stack_size as u32) << stack_size_offset,
+                    | ((stack_size as u32) << stack_size_offset),
             );
             let expected = vec![
                 CompactCfiOp::RegisterIs {
@@ -2631,7 +2630,7 @@ mod test {
             let opcode = Opcode(
                 X86_MODE_RBP_FRAME
                     | pack_x86_rbp_registers(registers)
-                    | (stack_size as u32) << stack_size_offset,
+                    | ((stack_size as u32) << stack_size_offset),
             );
             let expected = vec![
                 CompactCfiOp::RegisterIs {
@@ -2895,7 +2894,7 @@ mod test {
             let opcode = Opcode(
                 X86_MODE_RBP_FRAME
                     | pack_x86_rbp_registers(registers)
-                    | (stack_size as u32) << stack_size_offset,
+                    | ((stack_size as u32) << stack_size_offset),
             );
             let expected = vec![
                 CompactCfiOp::RegisterIs {
@@ -2927,7 +2926,7 @@ mod test {
             let opcode = Opcode(
                 X86_MODE_RBP_FRAME
                     | pack_x86_rbp_registers(registers)
-                    | (stack_size as u32) << stack_size_offset,
+                    | ((stack_size as u32) << stack_size_offset),
             );
             let expected = vec![
                 CompactCfiOp::RegisterIs {
@@ -2964,7 +2963,7 @@ mod test {
             let opcode = Opcode(
                 X86_MODE_RBP_FRAME
                     | pack_x86_rbp_registers(registers)
-                    | (stack_size as u32) << stack_size_offset,
+                    | ((stack_size as u32) << stack_size_offset),
             );
             let expected = vec![
                 CompactCfiOp::RegisterIs {
@@ -3021,7 +3020,7 @@ mod test {
             let opcode = Opcode(
                 X86_MODE_RBP_FRAME
                     | pack_x86_rbp_registers(registers)
-                    | (stack_size as u32) << stack_size_offset,
+                    | ((stack_size as u32) << stack_size_offset),
             );
             let expected = vec![
                 CompactCfiOp::RegisterIs {

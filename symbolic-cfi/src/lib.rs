@@ -717,6 +717,15 @@ impl<W: Write> AsciiCfiWriter<W> {
         R: Reader + Eq,
         U: UnwindSection<R>,
     {
+        // We have seen FDEs with an initial address of `u64::MAX` in user-provided
+        // DWARF files. Such FDEs will invariably fail to process because of either
+        // an address overflow error in `gimli` or an underflow in the `length`
+        // calculation below. Therefore, we skip them immediately so we don't abort
+        // the processing of the entire file.
+        if fde.initial_address() == u64::MAX {
+            return Ok(());
+        }
+
         // Retrieves the register that specifies the return address. We need to assign a special
         // format to this register for Breakpad.
         let ra = fde.cie().return_address_register();
@@ -785,7 +794,7 @@ impl<W: Write> AsciiCfiWriter<W> {
                 // row.
                 let mut ra_written = false;
                 for &(register, ref rule) in row.registers() {
-                    if !rule_cache.get(&register).map_or(false, |c| c == &rule) {
+                    if rule_cache.get(&register) != Some(&rule) {
                         rule_cache.insert(register, rule);
                         if register == ra {
                             ra_written = true;
@@ -894,7 +903,7 @@ impl<W: Write> AsciiCfiWriter<W> {
             // occur with a `code_start` close to the end of a function's code range, it seems
             // likely that these belong to the function epilog and code_size has a different meaning
             // in this case. Until this value is understood, skip these entries.
-            if frame.code_size > i32::max_value() as u32 {
+            if frame.code_size > i32::MAX as u32 {
                 continue;
             }
 
@@ -1189,7 +1198,7 @@ struct CfiCacheV1<'a> {
     byteview: ByteView<'a>,
 }
 
-impl<'a> CfiCacheV1<'a> {
+impl CfiCacheV1<'_> {
     pub fn raw(&self) -> &[u8] {
         &self.byteview
     }
@@ -1268,7 +1277,7 @@ fn write_preamble<W: Write>(mut writer: W, version: u32) -> Result<(), io::Error
 impl<'a> CfiCache<'a> {
     /// Load a symcache from a `ByteView`.
     pub fn from_bytes(byteview: ByteView<'a>) -> Result<Self, CfiError> {
-        if byteview.len() == 0 || byteview.starts_with(b"STACK") {
+        if byteview.is_empty() || byteview.starts_with(b"STACK") {
             let inner = CfiCacheInner::Unversioned(CfiCacheV1 { byteview });
             return Ok(CfiCache { inner });
         }

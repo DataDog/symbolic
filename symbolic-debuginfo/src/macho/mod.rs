@@ -349,10 +349,8 @@ impl<'d> MachObject<'d> {
     ///
     /// This is an indication that BCSymbolMaps are needed to symbolicate crash reports correctly.
     pub fn requires_symbolmap(&self) -> bool {
-        self.symbols().any(|s| {
-            s.name()
-                .map_or(false, |n| n.starts_with(SWIFT_HIDDEN_PREFIX))
-        })
+        self.symbols()
+            .any(|s| s.name().is_some_and(|n| n.starts_with(SWIFT_HIDDEN_PREFIX)))
     }
 }
 
@@ -375,7 +373,7 @@ impl fmt::Debug for MachObject<'_> {
 impl<'slf, 'd: 'slf> AsSelf<'slf> for MachObject<'d> {
     type Ref = MachObject<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         self
     }
 }
@@ -468,7 +466,7 @@ impl<'data> Dwarf<'data> for MachObject<'data> {
             for section in segment.into_iter() {
                 let (header, data) = section.ok()?;
                 if let Ok(sec) = header.name() {
-                    if sec.starts_with("__") && &sec[2..] == section_name {
+                    if sec.starts_with("__") && map_section_name(&sec[2..]) == section_name {
                         // In some cases, dsymutil leaves sections headers but removes their
                         // data from the file. While the addr and size parameters are still
                         // set, `header.offset` is 0 in that case. We skip them just like the
@@ -492,6 +490,13 @@ impl<'data> Dwarf<'data> for MachObject<'data> {
     }
 }
 
+/// See <https://llvm.org/doxygen/MachOObjectFile_8cpp_source.html#l05341>.
+fn map_section_name(name: &str) -> &str {
+    match name {
+        "debug_str_offs" => "debug_str_offsets",
+        _ => name,
+    }
+}
 /// An iterator over symbols in the MachO file.
 ///
 /// Returned by [`MachObject::symbols`](struct.MachObject.html#method.symbols).
@@ -559,7 +564,7 @@ pub struct FatMachObjectIterator<'d, 'a> {
     data: &'d [u8],
 }
 
-impl<'d, 'a> Iterator for FatMachObjectIterator<'d, 'a> {
+impl<'d> Iterator for FatMachObjectIterator<'d, '_> {
     type Item = Result<MachObject<'d>, MachError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -647,7 +652,7 @@ impl fmt::Debug for FatMachO<'_> {
 impl<'slf, 'd: 'slf> AsSelf<'slf> for FatMachO<'d> {
     type Ref = FatMachO<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         self
     }
 }
@@ -661,7 +666,7 @@ enum MachObjectIteratorInner<'d, 'a> {
 /// An iterator over objects in a [`MachArchive`](struct.MachArchive.html).
 pub struct MachObjectIterator<'d, 'a>(MachObjectIteratorInner<'d, 'a>);
 
-impl<'d, 'a> Iterator for MachObjectIterator<'d, 'a> {
+impl<'d> Iterator for MachObjectIterator<'d, '_> {
     type Item = Result<MachObject<'d>, MachError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -796,13 +801,14 @@ impl<'d> MachArchive<'d> {
 impl<'slf, 'd: 'slf> AsSelf<'slf> for MachArchive<'d> {
     type Ref = MachArchive<'slf>;
 
-    fn as_self(&'slf self) -> &Self::Ref {
+    fn as_self(&'slf self) -> &'slf Self::Ref {
         self
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

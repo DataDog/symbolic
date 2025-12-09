@@ -1,6 +1,6 @@
 [package]
 name = "symbolic-debuginfo"
-version = "12.9.2-dd"
+version = "12.17.0-dd"
 license = "MIT"
 authors = [
     "Armin Ronacher <armin.ronacher@active-4.com>",
@@ -13,7 +13,8 @@ description = """
 A library to inspect and load DWARF debugging information from binaries, such
 as Mach-O or ELF.
 """
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 
 exclude = ["tests/**/*"]
 
@@ -68,6 +69,7 @@ ms = [
     "pdb-addr2line",
     "scroll",
     "smallvec",
+    "srcsrv",
 ]
 ppdb = ["symbolic-ppdb"]
 # Source bundle creation
@@ -87,7 +89,6 @@ js = []
 wasm = ["dwarf", "wasmparser"]
 
 [dependencies]
-dmsort = { workspace = true }
 debugid = { workspace = true }
 elementtree = { workspace = true, optional = true }
 elsa = { workspace = true, optional = true }
@@ -106,8 +107,9 @@ scroll = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 smallvec = { workspace = true, optional = true }
-symbolic-common = { version = "12.9.2-dd", path = "../symbolic-common" }
-symbolic-ppdb = { version = "12.9.2-dd", path = "../symbolic-ppdb", optional = true }
+srcsrv = { version = "0.2", optional = true }
+symbolic-common = { version = "12.17.0-dd", path = "../symbolic-common" }
+symbolic-ppdb = { version = "12.17.0-dd", path = "../symbolic-ppdb", optional = true }
 thiserror = { workspace = true }
 wasmparser = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
@@ -116,6 +118,7 @@ zstd = { workspace = true, optional = true }
 [dev-dependencies]
 criterion = { workspace = true }
 insta = { workspace = true }
+proptest = {workspace = true }
 tempfile = { workspace = true }
 similar-asserts = { workspace = true }
 symbolic-testutils = { path = "../symbolic-testutils" }
