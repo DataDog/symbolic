@@ -1,5 +1,17 @@
 # Changelog
 
+## 12.17.2
+
+**Fixes**
+
+- symcache: Fixed an unsound implementation of `Pod` ([#958](https://github.com/getsentry/symbolic/pull/958))
+
+## 12.17.1
+
+**Fixes**
+
+- minidump: Define default .ra rules for PPC and ARM ([#949](https://github.com/getsentry/symbolic/pull/949))
+
 ## 12.17.0
 
 - feat(pdb): Extract the srcsrv integration name for metrics ([#944](https://github.com/getsentry/symbolic/pull/944))
