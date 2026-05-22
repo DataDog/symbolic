@@ -6,7 +6,7 @@ use symbolic::common::{AsSelf, ByteView, SelfCell};
 use crate::core::{SymbolicStr, SymbolicUuid};
 use crate::utils::ForeignObject;
 
-use proguard::{ProguardMapper, ProguardMapping, StackFrame};
+use proguard::{ProguardCache, ProguardMapper, ProguardMapping, StackFrame};
 
 /// Represents a Java Stack Frame.
 #[repr(C)]
@@ -101,7 +101,7 @@ ffi_fn! {
                 class_name: frame.class().to_owned().into(),
                 method: frame.method().to_owned().into(),
                 file: frame.file().unwrap_or("").to_owned().into(),
-                line: frame.line(),
+                line: frame.line().unwrap_or(0),
                 parameters: frame.parameters().unwrap_or("").to_owned().into(),
             }
         }).collect();
@@ -189,5 +189,74 @@ ffi_fn! {
             let result = &*result;
             Vec::from_raw_parts(result.frames, result.len, result.len);
         }
+    }
+}
+
+// ── ProguardCache ─────────────────────────────────────────────────────────────
+
+struct CacheInner<'a> {
+    cache: ProguardCache<'a>,
+}
+
+impl<'slf, 'a: 'slf> AsSelf<'slf> for CacheInner<'a> {
+    type Ref = CacheInner<'slf>;
+
+    fn as_self(&'slf self) -> &'slf Self::Ref {
+        self
+    }
+}
+
+pub struct OwnedProguardCache<'a> {
+    inner: SelfCell<ByteView<'a>, CacheInner<'a>>,
+}
+
+/// Represents a ProguardCache.
+pub struct SymbolicProguardCache;
+
+impl ForeignObject for SymbolicProguardCache {
+    type RustObject = OwnedProguardCache<'static>;
+}
+
+ffi_fn! {
+    /// Parses a ProguardCache from its binary representation.
+    unsafe fn symbolic_proguardcache_open(
+        bytes: *const u8,
+        len: usize,
+    ) -> Result<*mut SymbolicProguardCache> {
+        let byteview = ByteView::from_vec(std::slice::from_raw_parts(bytes, len).to_vec());
+        let inner = SelfCell::try_new(byteview, |data| {
+            // SAFETY: data points into the ByteView we just created.
+            ProguardCache::parse(unsafe { &*data })
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + 'static>)
+                .map(|cache| CacheInner { cache })
+        })?;
+        Ok(SymbolicProguardCache::from_rust(OwnedProguardCache { inner }))
+    }
+}
+
+ffi_fn! {
+    /// Frees a ProguardCache.
+    unsafe fn symbolic_proguardcache_free(cache: *mut SymbolicProguardCache) {
+        SymbolicProguardCache::drop(cache);
+    }
+}
+
+ffi_fn! {
+    /// Runs the integrity check on a ProguardCache. Panics (caught by the FFI
+    /// landing pad) if the cache is corrupt.
+    unsafe fn symbolic_proguardcache_test(cache: *const SymbolicProguardCache) {
+        SymbolicProguardCache::as_rust(cache).inner.get().cache.test();
+    }
+}
+
+ffi_fn! {
+    /// Remaps an obfuscated stacktrace using the ProguardCache.
+    unsafe fn symbolic_proguardcache_remap_stacktrace(
+        cache: *const SymbolicProguardCache,
+        stacktrace: *const SymbolicStr,
+    ) -> Result<SymbolicStr> {
+        let cache = &SymbolicProguardCache::as_rust(cache).inner.get().cache;
+        let result = cache.remap_stacktrace((*stacktrace).as_str())?;
+        Ok(result.into())
     }
 }
