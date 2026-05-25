@@ -218,6 +218,32 @@ impl ForeignObject for SymbolicProguardCache {
 }
 
 ffi_fn! {
+    /// Builds a ProguardCache from the bytes of a raw ProGuard mapping file.
+    ///
+    /// The resulting object holds the serialised binary in memory. Use
+    /// `symbolic_proguardcache_get_bytes` / `symbolic_proguardcache_get_size` to
+    /// retrieve those bytes for upload to blob storage, then free the object with
+    /// `symbolic_proguardcache_free`. To load a previously-stored cache use
+    /// `symbolic_proguardcache_open` instead.
+    unsafe fn symbolic_proguardcache_from_mapping(
+        bytes: *const u8,
+        len: usize,
+    ) -> Result<*mut SymbolicProguardCache> {
+        let data = std::slice::from_raw_parts(bytes, len);
+        let mapping = ProguardMapping::new(data);
+        let mut buf: Vec<u8> = Vec::new();
+        ProguardCache::write(&mapping, &mut buf)?;
+        let byteview = ByteView::from_vec(buf);
+        let inner = SelfCell::try_new(byteview, |data| {
+            ProguardCache::parse(unsafe { &*data })
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + 'static>)
+                .map(|cache| CacheInner { cache })
+        })?;
+        Ok(SymbolicProguardCache::from_rust(OwnedProguardCache { inner }))
+    }
+}
+
+ffi_fn! {
     /// Parses a ProguardCache from its binary representation.
     unsafe fn symbolic_proguardcache_open(
         bytes: *const u8,
@@ -231,6 +257,27 @@ ffi_fn! {
                 .map(|cache| CacheInner { cache })
         })?;
         Ok(SymbolicProguardCache::from_rust(OwnedProguardCache { inner }))
+    }
+}
+
+ffi_fn! {
+    /// Returns a pointer to the raw bytes of the ProguardCache binary.
+    ///
+    /// The pointer is valid for the lifetime of the cache object. Use
+    /// `symbolic_proguardcache_get_size` for the byte count.
+    unsafe fn symbolic_proguardcache_get_bytes(
+        cache: *const SymbolicProguardCache,
+    ) -> Result<*const u8> {
+        Ok(SymbolicProguardCache::as_rust(cache).inner.owner().as_slice().as_ptr())
+    }
+}
+
+ffi_fn! {
+    /// Returns the size in bytes of the ProguardCache binary.
+    unsafe fn symbolic_proguardcache_get_size(
+        cache: *const SymbolicProguardCache,
+    ) -> Result<usize> {
+        Ok(SymbolicProguardCache::as_rust(cache).inner.owner().len())
     }
 }
 
