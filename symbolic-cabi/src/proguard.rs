@@ -16,6 +16,10 @@ pub struct SymbolicJavaStackFrame {
     pub file: SymbolicStr,
     pub line: usize,
     pub parameters: SymbolicStr,
+    /// True if this method (or its containing class) was synthesized by the
+    /// compiler (e.g. R8 lambda wrapper). Callers should use this to decide
+    /// whether to stop expanding inline chains at the outermost frame.
+    pub is_synthesized: bool,
 }
 
 /// The result of remapping a Stack Frame.
@@ -103,6 +107,7 @@ ffi_fn! {
                 file: frame.file().unwrap_or("").to_owned().into(),
                 line: frame.line().unwrap_or(0),
                 parameters: frame.parameters().unwrap_or("").to_owned().into(),
+                is_synthesized: frame.method_synthesized(),
             }
         }).collect();
 
@@ -151,6 +156,7 @@ ffi_fn! {
             file: "".to_owned().into(),
             line: 0,
             parameters: "".to_owned().into(),
+            is_synthesized: false,
         }];
 
         frames.shrink_to_fit();
@@ -305,5 +311,69 @@ ffi_fn! {
         let cache = &SymbolicProguardCache::as_rust(cache).inner.get().cache;
         let result = cache.remap_stacktrace((*stacktrace).as_str())?;
         Ok(result.into())
+    }
+}
+
+ffi_fn! {
+    /// Remaps a single Stack Frame using the ProguardCache.
+    ///
+    /// Returns an array of deobfuscated frames. Multiple frames indicate
+    /// inlined method expansion. Each frame carries an `is_synthesized` flag
+    /// set when the method or its containing class was marked synthesized by
+    /// the compiler (e.g. R8 lambda). Free the result with
+    /// `symbolic_proguardcache_result_free`.
+    unsafe fn symbolic_proguardcache_remap_frame(
+        cache: *const SymbolicProguardCache,
+        class: *const SymbolicStr,
+        method: *const SymbolicStr,
+        line: usize,
+    ) -> Result<SymbolicProguardRemapResult> {
+        let cache = &SymbolicProguardCache::as_rust(cache).inner.get().cache;
+        let frame = StackFrame::new((*class).as_str(), (*method).as_str(), line);
+
+        let mut frames: Vec<_> = cache.remap_frame(&frame).map(|frame| {
+            SymbolicJavaStackFrame {
+                class_name: frame.class().to_owned().into(),
+                method: frame.method().to_owned().into(),
+                file: frame.file().unwrap_or("").to_owned().into(),
+                line: frame.line().unwrap_or(0),
+                parameters: frame.parameters().unwrap_or("").to_owned().into(),
+                is_synthesized: frame.method_synthesized(),
+            }
+        }).collect();
+
+        frames.shrink_to_fit();
+        let rv = SymbolicProguardRemapResult {
+            frames: frames.as_mut_ptr(),
+            len: frames.len(),
+        };
+        std::mem::forget(frames);
+
+        Ok(rv)
+    }
+}
+
+ffi_fn! {
+    /// Remaps an obfuscated class name using the ProguardCache.
+    ///
+    /// Returns the original class name, or an empty string if the class has
+    /// no mapping.
+    unsafe fn symbolic_proguardcache_remap_class(
+        cache: *const SymbolicProguardCache,
+        class: *const SymbolicStr,
+    ) -> Result<SymbolicStr> {
+        let cache = &SymbolicProguardCache::as_rust(cache).inner.get().cache;
+        let class = (*class).as_str();
+        Ok(cache.remap_class(class).unwrap_or("").to_owned().into())
+    }
+}
+
+ffi_fn! {
+    /// Frees a remap result produced by `symbolic_proguardcache_remap_frame`.
+    unsafe fn symbolic_proguardcache_result_free(result: *mut SymbolicProguardRemapResult) {
+        if !result.is_null() {
+            let result = &*result;
+            Vec::from_raw_parts(result.frames, result.len, result.len);
+        }
     }
 }
