@@ -17,7 +17,7 @@ edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["cdylib", "lib"] # lib is required for us to build symbolic in dd-source
+crate-type = ["cdylib", "lib"] # lib is required for us to build symbolic
 
 [dependencies]
 proguard = { workspace = true, features = ["uuid"] }
