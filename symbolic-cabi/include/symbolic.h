@@ -378,6 +378,14 @@ struct SymbolicStr symbolic_arch_ip_reg_name(const struct SymbolicStr *arch);
 void symbolic_init(void);
 
 /**
+ * Returns the version of the symbolic-cabi library.
+ *
+ * The returned string points to a static string baked into the binary and
+ * does not need to be freed.
+ */
+struct SymbolicStr symbolic_version(void);
+
+/**
  * Returns the last error code.
  *
  * If there is no error, 0 is returned.
