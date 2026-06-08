@@ -363,3 +363,12 @@ pub unsafe extern "C" fn symbolic_uuid_to_str(uuid: *const SymbolicUuid) -> Symb
     let uuid = Uuid::from_bytes((*uuid).data);
     SymbolicStr::from_string(uuid.hyphenated().to_string())
 }
+
+/// Returns the version of the symbolic-cabi library.
+///
+/// The returned string points to a static string baked into the binary and
+/// does not need to be freed.
+#[no_mangle]
+pub unsafe extern "C" fn symbolic_version() -> SymbolicStr {
+    SymbolicStr::new(env!("CARGO_PKG_VERSION"))
+}
