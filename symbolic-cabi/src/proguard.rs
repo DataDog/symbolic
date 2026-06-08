@@ -6,7 +6,7 @@ use symbolic::common::{AsSelf, ByteView, SelfCell};
 use crate::core::{SymbolicStr, SymbolicUuid};
 use crate::utils::ForeignObject;
 
-use proguard::{ProguardMapper, ProguardMapping, StackFrame};
+use proguard::{ProguardCache, ProguardMapper, ProguardMapping, StackFrame};
 
 /// Represents a Java Stack Frame.
 #[repr(C)]
@@ -16,6 +16,10 @@ pub struct SymbolicJavaStackFrame {
     pub file: SymbolicStr,
     pub line: usize,
     pub parameters: SymbolicStr,
+    /// True if this method (or its containing class) was synthesized by the
+    /// compiler (e.g. R8 lambda wrapper). Callers should use this to decide
+    /// whether to stop expanding inline chains at the outermost frame.
+    pub is_synthesized: bool,
 }
 
 /// The result of remapping a Stack Frame.
@@ -101,8 +105,9 @@ ffi_fn! {
                 class_name: frame.class().to_owned().into(),
                 method: frame.method().to_owned().into(),
                 file: frame.file().unwrap_or("").to_owned().into(),
-                line: frame.line(),
+                line: frame.line().unwrap_or(0),
                 parameters: frame.parameters().unwrap_or("").to_owned().into(),
+                is_synthesized: frame.method_synthesized(),
             }
         }).collect();
 
@@ -151,6 +156,7 @@ ffi_fn! {
             file: "".to_owned().into(),
             line: 0,
             parameters: "".to_owned().into(),
+            is_synthesized: false,
         }];
 
         frames.shrink_to_fit();
@@ -185,6 +191,186 @@ ffi_fn! {
 ffi_fn! {
     /// Frees a remap result.
     unsafe fn symbolic_proguardmapper_result_free(result: *mut SymbolicProguardRemapResult) {
+        if !result.is_null() {
+            let result = &*result;
+            Vec::from_raw_parts(result.frames, result.len, result.len);
+        }
+    }
+}
+
+// ── ProguardCache ─────────────────────────────────────────────────────────────
+
+struct CacheInner<'a> {
+    cache: ProguardCache<'a>,
+}
+
+impl<'slf, 'a: 'slf> AsSelf<'slf> for CacheInner<'a> {
+    type Ref = CacheInner<'slf>;
+
+    fn as_self(&'slf self) -> &'slf Self::Ref {
+        self
+    }
+}
+
+pub struct OwnedProguardCache<'a> {
+    inner: SelfCell<ByteView<'a>, CacheInner<'a>>,
+}
+
+/// Represents a ProguardCache.
+pub struct SymbolicProguardCache;
+
+impl ForeignObject for SymbolicProguardCache {
+    type RustObject = OwnedProguardCache<'static>;
+}
+
+ffi_fn! {
+    /// Builds a ProguardCache from the bytes of a raw ProGuard mapping file.
+    ///
+    /// The resulting object holds the serialised binary in memory. Use
+    /// `symbolic_proguardcache_get_bytes` / `symbolic_proguardcache_get_size` to
+    /// retrieve those bytes for upload to blob storage, then free the object with
+    /// `symbolic_proguardcache_free`. To load a previously-stored cache use
+    /// `symbolic_proguardcache_open` instead.
+    unsafe fn symbolic_proguardcache_from_mapping(
+        bytes: *const u8,
+        len: usize,
+    ) -> Result<*mut SymbolicProguardCache> {
+        let data = std::slice::from_raw_parts(bytes, len);
+        let mapping = ProguardMapping::new(data);
+        let mut buf: Vec<u8> = Vec::new();
+        ProguardCache::write(&mapping, &mut buf)?;
+        let byteview = ByteView::from_vec(buf);
+        let inner = SelfCell::try_new(byteview, |data| {
+            ProguardCache::parse(unsafe { &*data })
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + 'static>)
+                .map(|cache| CacheInner { cache })
+        })?;
+        Ok(SymbolicProguardCache::from_rust(OwnedProguardCache { inner }))
+    }
+}
+
+ffi_fn! {
+    /// Parses a ProguardCache from its binary representation.
+    unsafe fn symbolic_proguardcache_open(
+        bytes: *const u8,
+        len: usize,
+    ) -> Result<*mut SymbolicProguardCache> {
+        let byteview = ByteView::from_vec(std::slice::from_raw_parts(bytes, len).to_vec());
+        let inner = SelfCell::try_new(byteview, |data| {
+            // SAFETY: data points into the ByteView we just created.
+            ProguardCache::parse(unsafe { &*data })
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + 'static>)
+                .map(|cache| CacheInner { cache })
+        })?;
+        Ok(SymbolicProguardCache::from_rust(OwnedProguardCache { inner }))
+    }
+}
+
+ffi_fn! {
+    /// Returns a pointer to the raw bytes of the ProguardCache binary.
+    ///
+    /// The pointer is valid for the lifetime of the cache object. Use
+    /// `symbolic_proguardcache_get_size` for the byte count.
+    unsafe fn symbolic_proguardcache_get_bytes(
+        cache: *const SymbolicProguardCache,
+    ) -> Result<*const u8> {
+        Ok(SymbolicProguardCache::as_rust(cache).inner.owner().as_slice().as_ptr())
+    }
+}
+
+ffi_fn! {
+    /// Returns the size in bytes of the ProguardCache binary.
+    unsafe fn symbolic_proguardcache_get_size(
+        cache: *const SymbolicProguardCache,
+    ) -> Result<usize> {
+        Ok(SymbolicProguardCache::as_rust(cache).inner.owner().len())
+    }
+}
+
+ffi_fn! {
+    /// Frees a ProguardCache.
+    unsafe fn symbolic_proguardcache_free(cache: *mut SymbolicProguardCache) {
+        SymbolicProguardCache::drop(cache);
+    }
+}
+
+ffi_fn! {
+    /// Runs the integrity check on a ProguardCache. Panics (caught by the FFI
+    /// landing pad) if the cache is corrupt.
+    unsafe fn symbolic_proguardcache_test(cache: *const SymbolicProguardCache) {
+        SymbolicProguardCache::as_rust(cache).inner.get().cache.test();
+    }
+}
+
+ffi_fn! {
+    /// Remaps an obfuscated stacktrace using the ProguardCache.
+    unsafe fn symbolic_proguardcache_remap_stacktrace(
+        cache: *const SymbolicProguardCache,
+        stacktrace: *const SymbolicStr,
+    ) -> Result<SymbolicStr> {
+        let cache = &SymbolicProguardCache::as_rust(cache).inner.get().cache;
+        let result = cache.remap_stacktrace((*stacktrace).as_str())?;
+        Ok(result.into())
+    }
+}
+
+ffi_fn! {
+    /// Remaps a single Stack Frame using the ProguardCache.
+    ///
+    /// Returns an array of deobfuscated frames. Multiple frames indicate
+    /// inlined method expansion. Each frame carries an `is_synthesized` flag
+    /// set when the method or its containing class was marked synthesized by
+    /// the compiler (e.g. R8 lambda). Free the result with
+    /// `symbolic_proguardcache_result_free`.
+    unsafe fn symbolic_proguardcache_remap_frame(
+        cache: *const SymbolicProguardCache,
+        class: *const SymbolicStr,
+        method: *const SymbolicStr,
+        line: usize,
+    ) -> Result<SymbolicProguardRemapResult> {
+        let cache = &SymbolicProguardCache::as_rust(cache).inner.get().cache;
+        let frame = StackFrame::new((*class).as_str(), (*method).as_str(), line);
+
+        let mut frames: Vec<_> = cache.remap_frame(&frame).map(|frame| {
+            SymbolicJavaStackFrame {
+                class_name: frame.class().to_owned().into(),
+                method: frame.method().to_owned().into(),
+                file: frame.file().unwrap_or("").to_owned().into(),
+                line: frame.line().unwrap_or(0),
+                parameters: frame.parameters().unwrap_or("").to_owned().into(),
+                is_synthesized: frame.method_synthesized(),
+            }
+        }).collect();
+
+        frames.shrink_to_fit();
+        let rv = SymbolicProguardRemapResult {
+            frames: frames.as_mut_ptr(),
+            len: frames.len(),
+        };
+        std::mem::forget(frames);
+
+        Ok(rv)
+    }
+}
+
+ffi_fn! {
+    /// Remaps an obfuscated class name using the ProguardCache.
+    ///
+    /// Returns the original class name, or an empty string if the class has
+    /// no mapping.
+    unsafe fn symbolic_proguardcache_remap_class(
+        cache: *const SymbolicProguardCache,
+        class: *const SymbolicStr,
+    ) -> Result<SymbolicStr> {
+        let cache = &SymbolicProguardCache::as_rust(cache).inner.get().cache;
+        let class = (*class).as_str();
+        Ok(cache.remap_class(class).unwrap_or("").to_owned().into())
+    }
+}
+
+ffi_fn! {
+    /// Frees a remap result produced by `symbolic_proguardcache_remap_frame`.
+    unsafe fn symbolic_proguardcache_result_free(result: *mut SymbolicProguardRemapResult) {
         if !result.is_null() {
             let result = &*result;
             Vec::from_raw_parts(result.frames, result.len, result.len);
