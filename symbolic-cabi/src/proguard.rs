@@ -250,14 +250,21 @@ ffi_fn! {
 }
 
 ffi_fn! {
-    /// Parses a ProguardCache from its binary representation.
+    /// Parses a ProguardCache from its binary representation without taking
+    /// ownership of the pointer.
+    ///
+    /// The cache borrows `bytes` for its entire lifetime; it is not copied. The
+    /// caller must keep the buffer alive and at a fixed address until the cache
+    /// is released with `symbolic_proguardcache_free`. This mirrors
+    /// `symbolic_symcache_from_bytes`.
     unsafe fn symbolic_proguardcache_open(
         bytes: *const u8,
         len: usize,
     ) -> Result<*mut SymbolicProguardCache> {
-        let byteview = ByteView::from_vec(std::slice::from_raw_parts(bytes, len).to_vec());
+        let byteview = ByteView::from_slice(std::slice::from_raw_parts(bytes, len));
         let inner = SelfCell::try_new(byteview, |data| {
-            // SAFETY: data points into the ByteView we just created.
+            // SAFETY: data points into the ByteView we just created, which
+            // borrows the caller's buffer.
             ProguardCache::parse(unsafe { &*data })
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + 'static>)
                 .map(|cache| CacheInner { cache })
