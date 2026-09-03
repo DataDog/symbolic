@@ -2468,11 +2468,10 @@ version = "12.17.6-dd"
 dependencies = [
  "anyhow",
  "async-trait",
- "breakpad-symbols",
- "debugid",
  "futures-executor",
  "minidump",
  "minidump-processor",
+ "minidump-unwind",
  "proguard",
  "serde",
  "serde_json",

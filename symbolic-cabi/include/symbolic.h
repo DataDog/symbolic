@@ -185,34 +185,18 @@ typedef struct SymbolicIL2CPPLineMappingResult {
 } SymbolicIL2CPPLineMappingResult;
 
 /**
- * One request-scoped Breakpad symbol file supplied by the caller.
+ * One request-scoped symbolic symcache supplied by the caller.
  */
-typedef struct SymbolicMinidumpSymbol {
+typedef struct SymbolicMinidumpSymCache {
   /**
-   * UTF-8 debug file name used to match a minidump module.
-   */
-  const uint8_t *debug_file;
-  /**
-   * Number of bytes in `debug_file`.
-   */
-  uintptr_t debug_file_len;
-  /**
-   * UTF-8 Breakpad debug identifier used to match a minidump module.
-   */
-  const uint8_t *debug_id;
-  /**
-   * Number of bytes in `debug_id`.
-   */
-  uintptr_t debug_id_len;
-  /**
-   * Complete UTF-8 Breakpad `.sym` contents.
+   * Complete serialized symbolic symcache contents.
    */
   const uint8_t *contents;
   /**
    * Number of bytes in `contents`.
    */
   uintptr_t contents_len;
-} SymbolicMinidumpSymbol;
+} SymbolicMinidumpSymCache;
 
 /**
  * Represents a Java Stack Frame.
@@ -612,18 +596,18 @@ struct SymbolicStr symbolic_minidump_inspect(const uint8_t *dump,
                                              uintptr_t dump_len);
 
 /**
- * Processes minidump bytes with request-scoped Breakpad symbols.
+ * Processes minidump bytes with request-scoped symbolic symcaches.
  *
- * Missing symbol files are allowed and produce a partial stackwalk. Every
- * supplied symbol file must match a loaded module by debug file and debug
+ * Missing symcaches are allowed and produce a partial stackwalk. Every
+ * supplied symcache must match a loaded module by its embedded debug
  * identifier. All input pointers are borrowed for this synchronous call.
  * The returned JSON string is owned and must be released with
  * `symbolic_str_free`.
  */
 struct SymbolicStr symbolic_minidump_process(const uint8_t *dump,
                                              uintptr_t dump_len,
-                                             const struct SymbolicMinidumpSymbol *symbols,
-                                             uintptr_t symbols_len);
+                                             const struct SymbolicMinidumpSymCache *symcaches,
+                                             uintptr_t symcaches_len);
 
 /**
  * Creates a proguard mapping view from a path.
