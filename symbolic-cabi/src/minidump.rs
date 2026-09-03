@@ -1,31 +1,23 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::slice;
-use std::str;
 
-use breakpad_symbols::{
-    FileError, FileKind, LocateSymbolsResult, SymbolError, SymbolFile, SymbolSupplier, Symbolizer,
-};
 use futures_executor::block_on;
 use minidump::{Minidump, MinidumpModuleList, MinidumpSystemInfo, Module};
 use minidump_processor::process_minidump;
+use minidump_unwind::symbols::{
+    FileError, FileKind, FillSymbolError, FrameSymbolizer, FrameWalker, SymbolProvider, SymbolStats,
+};
 use serde::Serialize;
 use symbolic::common::DebugId;
+use symbolic::symcache::SymCache;
 
 use crate::core::SymbolicStr;
 
-/// One request-scoped Breakpad symbol file supplied by the caller.
+/// One request-scoped symbolic symcache supplied by the caller.
 #[repr(C)]
-pub struct SymbolicMinidumpSymbol {
-    /// UTF-8 debug file name used to match a minidump module.
-    pub debug_file: *const u8,
-    /// Number of bytes in `debug_file`.
-    pub debug_file_len: usize,
-    /// UTF-8 Breakpad debug identifier used to match a minidump module.
-    pub debug_id: *const u8,
-    /// Number of bytes in `debug_id`.
-    pub debug_id_len: usize,
-    /// Complete UTF-8 Breakpad `.sym` contents.
+pub struct SymbolicMinidumpSymCache {
+    /// Complete serialized symbolic symcache contents.
     pub contents: *const u8,
     /// Number of bytes in `contents`.
     pub contents_len: usize,
@@ -79,64 +71,75 @@ struct ModuleInfo {
     code_id: Option<String>,
     debug_file: Option<String>,
     debug_id: Option<String>,
+    breakpad_id: Option<String>,
     base_address: u64,
     size: u64,
 }
 
-struct SymbolInput<'a> {
-    debug_file: &'a str,
-    debug_id: &'a str,
-    contents: &'a str,
+struct SymCacheInput<'a> {
+    contents: &'a [u8],
 }
 
-#[derive(Eq, Hash, PartialEq)]
-struct SymbolKey {
-    debug_file: String,
-    debug_id: String,
-}
-
-struct InMemorySymbolSupplier {
-    symbols: HashMap<SymbolKey, String>,
+struct InMemorySymCacheProvider<'a> {
+    caches: HashMap<DebugId, SymCache<'a>>,
+    stats: HashMap<String, SymbolStats>,
 }
 
 #[async_trait::async_trait]
-impl SymbolSupplier for InMemorySymbolSupplier {
-    async fn locate_symbols(
+impl SymbolProvider for InMemorySymCacheProvider<'_> {
+    async fn fill_symbol(
         &self,
         module: &(dyn Module + Sync),
-    ) -> Result<LocateSymbolsResult, SymbolError> {
-        let debug_file = module.debug_file().ok_or(SymbolError::NotFound)?;
-        let debug_id = module.debug_identifier().ok_or(SymbolError::NotFound)?;
-        let key = SymbolKey {
-            debug_file: normalize_debug_file(&debug_file),
-            debug_id: debug_id.breakpad().to_string(),
-        };
-        let contents = self.symbols.get(&key).ok_or(SymbolError::NotFound)?;
-        Ok(LocateSymbolsResult {
-            symbols: SymbolFile::from_bytes(contents.as_bytes())?,
-            extra_debug_info: None,
-        })
+        frame: &mut (dyn FrameSymbolizer + Send),
+    ) -> Result<(), FillSymbolError> {
+        let debug_id = module.debug_identifier().ok_or(FillSymbolError {})?;
+        let cache = self.caches.get(&debug_id).ok_or(FillSymbolError {})?;
+        let relative_address = frame
+            .get_instruction()
+            .checked_sub(module.base_address())
+            .ok_or(FillSymbolError {})?;
+        let locations = cache.lookup(relative_address).collect::<Vec<_>>();
+        let outermost = locations.last().ok_or(FillSymbolError {})?;
+        let outermost_function = outermost.function();
+        let function_base = module.base_address() + u64::from(outermost_function.entry_pc());
+
+        frame.set_function(outermost_function.name(), function_base, 0);
+        if let Some(file) = outermost.file() {
+            frame.set_source_file(&file.full_path(), outermost.line(), function_base);
+        }
+
+        for inline in locations[..locations.len() - 1].iter().rev() {
+            let file = inline.file().map(|file| file.full_path());
+            let line = (inline.line() != 0).then(|| inline.line());
+            frame.add_inline_frame(inline.function().name(), file.as_deref(), line);
+        }
+        Ok(())
     }
 
-    async fn locate_file(
+    async fn walk_frame(
+        &self,
+        _module: &(dyn Module + Sync),
+        _walker: &mut (dyn FrameWalker + Send),
+    ) -> Option<()> {
+        // Symcaches contain symbol and source mappings, but not unwind CFI.
+        None
+    }
+
+    async fn get_file_path(
         &self,
         _module: &(dyn Module + Sync),
         _file_kind: FileKind,
     ) -> Result<PathBuf, FileError> {
         Err(FileError::NotFound)
     }
+
+    fn stats(&self) -> HashMap<String, SymbolStats> {
+        self.stats.clone()
+    }
 }
 
 fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
-fn normalize_debug_file(path: &str) -> String {
-    basename(path).to_ascii_lowercase()
-}
-
-fn parse_debug_id(debug_id: &str) -> Result<DebugId, debugid::ParseDebugIdError> {
-    DebugId::from_breakpad(debug_id).or_else(|_| debug_id.parse())
 }
 
 fn inspect(dump: &[u8]) -> Result<String, MinidumpError> {
@@ -152,17 +155,19 @@ fn inspect(dump: &[u8]) -> Result<String, MinidumpError> {
 
     let mut modules = module_list
         .iter()
-        .map(|module| ModuleInfo {
-            code_file: module.code_file().into_owned(),
-            code_id: module
-                .code_identifier()
-                .map(|identifier| identifier.to_string()),
-            debug_file: module.debug_file().map(|file| file.into_owned()),
-            debug_id: module
-                .debug_identifier()
-                .map(|identifier| identifier.to_string()),
-            base_address: module.base_address(),
-            size: module.size(),
+        .map(|module| {
+            let debug_id = module.debug_identifier();
+            ModuleInfo {
+                code_file: module.code_file().into_owned(),
+                code_id: module
+                    .code_identifier()
+                    .map(|identifier| identifier.to_string()),
+                debug_file: module.debug_file().map(|file| file.into_owned()),
+                debug_id: debug_id.map(|identifier| identifier.to_string()),
+                breakpad_id: debug_id.map(|identifier| identifier.breakpad().to_string()),
+                base_address: module.base_address(),
+                size: module.size(),
+            }
         })
         .collect::<Vec<_>>();
     modules.sort_unstable_by_key(|module| module.base_address);
@@ -175,7 +180,7 @@ fn inspect(dump: &[u8]) -> Result<String, MinidumpError> {
     .map_err(|error| MinidumpError::new(MinidumpErrorKind::Internal, error.to_string()))
 }
 
-fn process(dump_bytes: &[u8], symbols: &[SymbolInput<'_>]) -> Result<String, MinidumpError> {
+fn process(dump_bytes: &[u8], symcaches: &[SymCacheInput<'_>]) -> Result<String, MinidumpError> {
     let dump = Minidump::read(dump_bytes).map_err(|error| {
         MinidumpError::new(MinidumpErrorKind::InvalidMinidump, error.to_string())
     })?;
@@ -183,79 +188,53 @@ fn process(dump_bytes: &[u8], symbols: &[SymbolInput<'_>]) -> Result<String, Min
         MinidumpError::new(MinidumpErrorKind::InvalidMinidump, error.to_string())
     })?;
 
-    let mut symbols_by_identity = HashMap::with_capacity(symbols.len());
-    for supplied in symbols {
-        let parsed = SymbolFile::from_bytes(supplied.contents.as_bytes()).map_err(|error| {
+    let mut caches_by_debug_id = HashMap::with_capacity(symcaches.len());
+    for supplied in symcaches {
+        let cache = SymCache::parse(supplied.contents).map_err(|error| {
             MinidumpError::new(
                 MinidumpErrorKind::InvalidSymbols,
-                format!("invalid symbol file {}: {error}", supplied.debug_file),
+                format!("invalid symcache: {error}"),
             )
         })?;
-        let parsed_debug_id = parse_debug_id(&parsed.module_id).map_err(|error| {
-            MinidumpError::new(
-                MinidumpErrorKind::InvalidSymbols,
-                format!("invalid MODULE debug ID {}: {error}", parsed.module_id),
-            )
-        })?;
-        let supplied_debug_id = parse_debug_id(supplied.debug_id).map_err(|error| {
-            MinidumpError::new(
-                MinidumpErrorKind::InvalidSymbols,
-                format!("invalid supplied debug ID {}: {error}", supplied.debug_id),
-            )
-        })?;
-        if normalize_debug_file(&parsed.debug_file) != normalize_debug_file(supplied.debug_file)
-            || parsed_debug_id != supplied_debug_id
-        {
-            return Err(MinidumpError::new(
-                MinidumpErrorKind::InvalidSymbols,
-                format!(
-                    "symbol contents do not match supplied identity {} {}",
-                    supplied.debug_file, supplied.debug_id
-                ),
-            ));
-        }
+        let debug_id = cache.debug_id();
 
-        let matching_modules = modules
+        let matches_module = modules
             .iter()
-            .filter(|module| {
-                module.debug_file().is_some_and(|file| {
-                    normalize_debug_file(&file) == normalize_debug_file(supplied.debug_file)
-                }) && module
-                    .debug_identifier()
-                    .is_some_and(|identifier| identifier == supplied_debug_id)
-            })
-            .collect::<Vec<_>>();
-        if matching_modules.is_empty() {
+            .any(|module| module.debug_identifier() == Some(debug_id));
+        if !matches_module {
             return Err(MinidumpError::new(
                 MinidumpErrorKind::InvalidSymbols,
-                format!(
-                    "symbol identity {} {} did not match a minidump module",
-                    supplied.debug_file, supplied.debug_id
-                ),
+                format!("symcache debug ID {debug_id} did not match a minidump module"),
             ));
         }
 
-        let key = SymbolKey {
-            debug_file: normalize_debug_file(supplied.debug_file),
-            debug_id: supplied_debug_id.breakpad().to_string(),
-        };
-        if symbols_by_identity
-            .insert(key, supplied.contents.to_owned())
-            .is_some()
-        {
+        if caches_by_debug_id.insert(debug_id, cache).is_some() {
             return Err(MinidumpError::new(
                 MinidumpErrorKind::InvalidSymbols,
-                format!(
-                    "duplicate symbol identity {} {}",
-                    supplied.debug_file, supplied.debug_id
-                ),
+                format!("duplicate symcache debug ID {debug_id}"),
             ));
         }
     }
 
-    let provider = Symbolizer::new(InMemorySymbolSupplier {
-        symbols: symbols_by_identity,
-    });
+    let stats = modules
+        .iter()
+        .map(|module| {
+            let loaded_symbols = module
+                .debug_identifier()
+                .is_some_and(|debug_id| caches_by_debug_id.contains_key(&debug_id));
+            (
+                basename(&module.code_file()).to_owned(),
+                SymbolStats {
+                    loaded_symbols,
+                    ..SymbolStats::default()
+                },
+            )
+        })
+        .collect();
+    let provider = InMemorySymCacheProvider {
+        caches: caches_by_debug_id,
+        stats,
+    };
     let state = block_on(process_minidump(&dump, &provider)).map_err(|error| {
         MinidumpError::new(MinidumpErrorKind::InvalidMinidump, error.to_string())
     })?;
@@ -267,23 +246,18 @@ fn process(dump_bytes: &[u8], symbols: &[SymbolInput<'_>]) -> Result<String, Min
         .map_err(|error| MinidumpError::new(MinidumpErrorKind::Internal, error.to_string()))
 }
 
-unsafe fn borrowed_utf8<'a>(
+unsafe fn borrowed_bytes<'a>(
     data: *const u8,
     len: usize,
     field: &str,
-) -> Result<&'a str, MinidumpError> {
+) -> Result<&'a [u8], MinidumpError> {
     if data.is_null() || len == 0 {
         return Err(MinidumpError::new(
             MinidumpErrorKind::InvalidSymbols,
             format!("{field} must not be empty"),
         ));
     }
-    str::from_utf8(slice::from_raw_parts(data, len)).map_err(|error| {
-        MinidumpError::new(
-            MinidumpErrorKind::InvalidSymbols,
-            format!("{field} must be UTF-8: {error}"),
-        )
-    })
+    Ok(slice::from_raw_parts(data, len))
 }
 
 ffi_fn! {
@@ -308,51 +282,45 @@ ffi_fn! {
 }
 
 ffi_fn! {
-    /// Processes minidump bytes with request-scoped Breakpad symbols.
+    /// Processes minidump bytes with request-scoped symbolic symcaches.
     ///
-    /// Missing symbol files are allowed and produce a partial stackwalk. Every
-    /// supplied symbol file must match a loaded module by debug file and debug
+    /// Missing symcaches are allowed and produce a partial stackwalk. Every
+    /// supplied symcache must match a loaded module by its embedded debug
     /// identifier. All input pointers are borrowed for this synchronous call.
     /// The returned JSON string is owned and must be released with
     /// `symbolic_str_free`.
     unsafe fn symbolic_minidump_process(
         dump: *const u8,
         dump_len: usize,
-        symbols: *const SymbolicMinidumpSymbol,
-        symbols_len: usize,
+        symcaches: *const SymbolicMinidumpSymCache,
+        symcaches_len: usize,
     ) -> Result<SymbolicStr> {
-        if dump.is_null() || dump_len == 0 || (symbols.is_null() && symbols_len != 0) {
+        if dump.is_null() || dump_len == 0 || (symcaches.is_null() && symcaches_len != 0) {
             return Err(MinidumpError::new(
                 MinidumpErrorKind::InvalidArgument,
-                "minidump input is empty or the symbol array is invalid",
+                "minidump input is empty or the symcache array is invalid",
             ).into());
         }
 
         let dump = slice::from_raw_parts(dump, dump_len);
-        let native_symbols = if symbols_len == 0 {
+        let native_symcaches = if symcaches_len == 0 {
             &[]
         } else {
-            slice::from_raw_parts(symbols, symbols_len)
+            slice::from_raw_parts(symcaches, symcaches_len)
         };
-        let symbols = native_symbols
+        let symcaches = native_symcaches
             .iter()
-            .map(|symbol| {
-                Ok(SymbolInput {
-                    debug_file: borrowed_utf8(
-                        symbol.debug_file,
-                        symbol.debug_file_len,
-                        "debug_file",
-                    )?,
-                    debug_id: borrowed_utf8(symbol.debug_id, symbol.debug_id_len, "debug_id")?,
-                    contents: borrowed_utf8(
-                        symbol.contents,
-                        symbol.contents_len,
-                        "symbol contents",
+            .map(|symcache| {
+                Ok(SymCacheInput {
+                    contents: borrowed_bytes(
+                        symcache.contents,
+                        symcache.contents_len,
+                        "symcache contents",
                     )?,
                 })
             })
             .collect::<Result<Vec<_>, MinidumpError>>()?;
-        Ok(process(dump, &symbols)?.into())
+        Ok(process(dump, &symcaches)?.into())
     }
 }
 
@@ -360,9 +328,25 @@ ffi_fn! {
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::io::Cursor;
     use std::ptr;
+    use symbolic::debuginfo::Object;
+    use symbolic::symcache::SymCacheConverter;
 
     const CRASH_LINUX: &[u8] = include_bytes!("../../py/tests/res/minidump/crash_linux.dmp");
+
+    fn symcache_from_breakpad(contents: &[u8]) -> Vec<u8> {
+        let object = Object::parse(contents).expect("Breakpad fixture must parse");
+        let mut converter = SymCacheConverter::new();
+        converter
+            .process_object(&object)
+            .expect("Breakpad fixture must convert");
+        let mut symcache = Vec::new();
+        converter
+            .serialize(&mut Cursor::new(&mut symcache))
+            .expect("symcache must serialize");
+        symcache
+    }
 
     #[test]
     fn inspect_rejects_invalid_bytes() {
@@ -384,6 +368,11 @@ mod tests {
         assert!(inspection["modules"]
             .as_array()
             .is_some_and(|value| !value.is_empty()));
+        assert!(inspection["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|module| module["breakpad_id"].as_str().is_some()));
     }
 
     #[test]
@@ -410,7 +399,6 @@ mod tests {
             .find(|module| basename(&module.code_file()) == "crash_linux")
             .expect("fixture must contain crash_linux");
         let debug_file = module.debug_file().unwrap().into_owned();
-        let debug_id = module.debug_identifier().unwrap().to_string();
 
         let baseline = process(CRASH_LINUX, &[]).expect("fixture must be stackwalkable");
         let baseline: Value = serde_json::from_str(&baseline).expect("stackwalk must be JSON");
@@ -428,15 +416,14 @@ mod tests {
             basename(&debug_file),
         );
 
+        let symcache = symcache_from_breakpad(contents.as_bytes());
         let json = process(
             CRASH_LINUX,
-            &[SymbolInput {
-                debug_file: &debug_file,
-                debug_id: &debug_id,
-                contents: &contents,
+            &[SymCacheInput {
+                contents: &symcache,
             }],
         )
-        .expect("matching in-memory symbols must be accepted");
+        .expect("matching in-memory symcache must be accepted");
         let report: Value = serde_json::from_str(&json).expect("stackwalk result must be JSON");
         assert_eq!(
             report["crashing_thread"]["frames"][0]["function"],
@@ -463,66 +450,26 @@ mod tests {
     }
 
     #[test]
-    fn process_classifies_invalid_symbol_utf8() {
-        let invalid_utf8 = [0xff];
-        let valid_debug_file = b"crash_linux";
-        let valid_debug_id = b"00112233445566778899AABBCCDDEEFF0";
-        let valid_contents = b"MODULE Linux x86_64 00112233445566778899AABBCCDDEEFF0 crash_linux";
-        struct Case<'a> {
-            field: &'a str,
-            debug_file: &'a [u8],
-            debug_id: &'a [u8],
-            contents: &'a [u8],
-        }
-        let cases = [
-            Case {
-                field: "debug_file",
-                debug_file: &invalid_utf8,
-                debug_id: valid_debug_id,
-                contents: valid_contents,
-            },
-            Case {
-                field: "debug_id",
-                debug_file: valid_debug_file,
-                debug_id: &invalid_utf8,
-                contents: valid_contents,
-            },
-            Case {
-                field: "symbol contents",
-                debug_file: valid_debug_file,
-                debug_id: valid_debug_id,
-                contents: &invalid_utf8,
-            },
-        ];
-
-        for case in cases {
-            let symbol = SymbolicMinidumpSymbol {
-                debug_file: case.debug_file.as_ptr(),
-                debug_file_len: case.debug_file.len(),
-                debug_id: case.debug_id.as_ptr(),
-                debug_id_len: case.debug_id.len(),
-                contents: case.contents.as_ptr(),
-                contents_len: case.contents.len(),
-            };
-            let result = unsafe {
-                symbolic_minidump_process(CRASH_LINUX.as_ptr(), CRASH_LINUX.len(), &symbol, 1)
-            };
-            assert!(result.data.is_null());
-            assert!(
-                matches!(
-                    unsafe { crate::core::symbolic_err_get_last_code() },
-                    crate::core::SymbolicErrorCode::MinidumpInvalidSymbols
-                ),
-                "invalid UTF-8 in {}",
-                case.field
-            );
-            let message = unsafe {
-                crate::core::symbolic_err_get_last_message()
-                    .as_str()
-                    .to_owned()
-            };
-            assert!(message.contains(case.field));
-            unsafe { crate::core::symbolic_err_clear() };
-        }
+    fn process_classifies_invalid_symcache() {
+        let invalid_contents = b"not a symcache";
+        let symcache = SymbolicMinidumpSymCache {
+            contents: invalid_contents.as_ptr(),
+            contents_len: invalid_contents.len(),
+        };
+        let result = unsafe {
+            symbolic_minidump_process(CRASH_LINUX.as_ptr(), CRASH_LINUX.len(), &symcache, 1)
+        };
+        assert!(result.data.is_null());
+        assert!(matches!(
+            unsafe { crate::core::symbolic_err_get_last_code() },
+            crate::core::SymbolicErrorCode::MinidumpInvalidSymbols
+        ));
+        let message = unsafe {
+            crate::core::symbolic_err_get_last_message()
+                .as_str()
+                .to_owned()
+        };
+        assert!(message.contains("invalid symcache"));
+        unsafe { crate::core::symbolic_err_clear() };
     }
 }

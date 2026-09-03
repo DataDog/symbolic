@@ -70,19 +70,12 @@ static void test_invalid_inputs(const uint8_t *dump, size_t dump_len) {
          SYMBOLIC_ERROR_CODE_MINIDUMP_INVALID_ARGUMENT);
 
   symbolic_err_clear();
-  const uint8_t invalid_utf8[] = {0xff};
-  const uint8_t debug_id[] = "00112233445566778899AABBCCDDEEFF0";
-  const uint8_t contents[] =
-      "MODULE Linux x86_64 00112233445566778899AABBCCDDEEFF0 crash_linux";
-  SymbolicMinidumpSymbol symbol = {
-      .debug_file = invalid_utf8,
-      .debug_file_len = sizeof(invalid_utf8),
-      .debug_id = debug_id,
-      .debug_id_len = sizeof(debug_id) - 1,
-      .contents = contents,
-      .contents_len = sizeof(contents) - 1,
+  const uint8_t invalid_symcache[] = "not a symcache";
+  SymbolicMinidumpSymCache symcache = {
+      .contents = invalid_symcache,
+      .contents_len = sizeof(invalid_symcache) - 1,
   };
-  result = symbolic_minidump_process(dump, dump_len, &symbol, 1);
+  result = symbolic_minidump_process(dump, dump_len, &symcache, 1);
   assert(result.data == NULL);
   assert(symbolic_err_get_last_code() ==
          SYMBOLIC_ERROR_CODE_MINIDUMP_INVALID_SYMBOLS);
