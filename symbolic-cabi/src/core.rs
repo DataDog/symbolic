@@ -134,7 +134,6 @@ impl From<Uuid> for SymbolicUuid {
 }
 
 /// Represents all possible error codes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum SymbolicErrorCode {
     NoError = 0,

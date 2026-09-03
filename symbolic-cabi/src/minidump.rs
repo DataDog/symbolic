@@ -455,10 +455,10 @@ mod tests {
             symbolic_minidump_process(CRASH_LINUX.as_ptr(), CRASH_LINUX.len(), ptr::null(), 1)
         };
         assert!(result.data.is_null());
-        assert_eq!(
+        assert!(matches!(
             unsafe { crate::core::symbolic_err_get_last_code() },
             crate::core::SymbolicErrorCode::MinidumpInvalidArgument
-        );
+        ));
         unsafe { crate::core::symbolic_err_clear() };
     }
 
@@ -508,9 +508,11 @@ mod tests {
                 symbolic_minidump_process(CRASH_LINUX.as_ptr(), CRASH_LINUX.len(), &symbol, 1)
             };
             assert!(result.data.is_null());
-            assert_eq!(
-                unsafe { crate::core::symbolic_err_get_last_code() },
-                crate::core::SymbolicErrorCode::MinidumpInvalidSymbols,
+            assert!(
+                matches!(
+                    unsafe { crate::core::symbolic_err_get_last_code() },
+                    crate::core::SymbolicErrorCode::MinidumpInvalidSymbols
+                ),
                 "invalid UTF-8 in {}",
                 case.field
             );
