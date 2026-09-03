@@ -194,6 +194,13 @@ pub enum SymbolicErrorCode {
     SymCacheErrorValueTooLarge = 6010,
     SymCacheErrorWriteFailed = 6011,
     SymCacheErrorTooManyValues = 6012,
+
+    // minidump
+    MinidumpErrorUnknown = 7000,
+    MinidumpInvalidArgument = 7001,
+    MinidumpInvalidMinidump = 7002,
+    MinidumpInvalidSymbols = 7003,
+    MinidumpInternalError = 7004,
 }
 
 impl SymbolicErrorCode {
@@ -209,6 +216,20 @@ impl SymbolicErrorCode {
             use std::io::Error as IoError;
             if error.downcast_ref::<IoError>().is_some() {
                 return SymbolicErrorCode::IoError;
+            }
+
+            use crate::minidump::{MinidumpError, MinidumpErrorKind};
+            if let Some(error) = error.downcast_ref::<MinidumpError>() {
+                return match error.kind() {
+                    MinidumpErrorKind::InvalidArgument => {
+                        SymbolicErrorCode::MinidumpInvalidArgument
+                    }
+                    MinidumpErrorKind::InvalidMinidump => {
+                        SymbolicErrorCode::MinidumpInvalidMinidump
+                    }
+                    MinidumpErrorKind::InvalidSymbols => SymbolicErrorCode::MinidumpInvalidSymbols,
+                    MinidumpErrorKind::Internal => SymbolicErrorCode::MinidumpInternalError,
+                };
             }
 
             use symbolic::common::{ParseDebugIdError, UnknownArchError, UnknownLanguageError};

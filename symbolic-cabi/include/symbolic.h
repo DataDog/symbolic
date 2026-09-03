@@ -66,6 +66,11 @@ enum SymbolicErrorCode
   SYMBOLIC_ERROR_CODE_SYM_CACHE_ERROR_VALUE_TOO_LARGE = 6010,
   SYMBOLIC_ERROR_CODE_SYM_CACHE_ERROR_WRITE_FAILED = 6011,
   SYMBOLIC_ERROR_CODE_SYM_CACHE_ERROR_TOO_MANY_VALUES = 6012,
+  SYMBOLIC_ERROR_CODE_MINIDUMP_ERROR_UNKNOWN = 7000,
+  SYMBOLIC_ERROR_CODE_MINIDUMP_INVALID_ARGUMENT = 7001,
+  SYMBOLIC_ERROR_CODE_MINIDUMP_INVALID_MINIDUMP = 7002,
+  SYMBOLIC_ERROR_CODE_MINIDUMP_INVALID_SYMBOLS = 7003,
+  SYMBOLIC_ERROR_CODE_MINIDUMP_INTERNAL_ERROR = 7004,
 };
 #if __STDC_VERSION__ >= 202311L
 typedef enum SymbolicErrorCode SymbolicErrorCode;
@@ -178,6 +183,36 @@ typedef struct SymbolicIL2CPPLineMappingResult {
   struct SymbolicStr file;
   uint32_t line;
 } SymbolicIL2CPPLineMappingResult;
+
+/**
+ * One request-scoped Breakpad symbol file supplied by the caller.
+ */
+typedef struct SymbolicMinidumpSymbol {
+  /**
+   * UTF-8 debug file name used to match a minidump module.
+   */
+  const uint8_t *debug_file;
+  /**
+   * Number of bytes in `debug_file`.
+   */
+  uintptr_t debug_file_len;
+  /**
+   * UTF-8 Breakpad debug identifier used to match a minidump module.
+   */
+  const uint8_t *debug_id;
+  /**
+   * Number of bytes in `debug_id`.
+   */
+  uintptr_t debug_id_len;
+  /**
+   * Complete UTF-8 Breakpad `.sym` contents.
+   */
+  const uint8_t *contents;
+  /**
+   * Number of bytes in `contents`.
+   */
+  uintptr_t contents_len;
+} SymbolicMinidumpSymbol;
 
 /**
  * Represents a Java Stack Frame.
@@ -378,14 +413,6 @@ struct SymbolicStr symbolic_arch_ip_reg_name(const struct SymbolicStr *arch);
 void symbolic_init(void);
 
 /**
- * Returns the version of the symbolic-cabi library.
- *
- * The returned string points to a static string baked into the binary and
- * does not need to be freed.
- */
-struct SymbolicStr symbolic_version(void);
-
-/**
  * Returns the last error code.
  *
  * If there is no error, 0 is returned.
@@ -435,6 +462,14 @@ bool symbolic_uuid_is_nil(const struct SymbolicUuid *uuid);
  * `symbolic_cstr_free`.
  */
 struct SymbolicStr symbolic_uuid_to_str(const struct SymbolicUuid *uuid);
+
+/**
+ * Returns the version of the symbolic-cabi library.
+ *
+ * The returned string points to a static string baked into the binary and
+ * does not need to be freed.
+ */
+struct SymbolicStr symbolic_version(void);
 
 /**
  * Loads an archive from a given path.
@@ -568,6 +603,29 @@ struct SymbolicIL2CPPLineMappingResult symbolic_il2cpp_line_mapping_lookup(const
 void symbolic_il2cpp_line_mapping_result_free(struct SymbolicIL2CPPLineMappingResult *result);
 
 /**
+ * Inspects minidump bytes and returns system and loaded-module metadata as JSON.
+ *
+ * The input is borrowed for this synchronous call. The returned string is
+ * owned and must be released with `symbolic_str_free`.
+ */
+struct SymbolicStr symbolic_minidump_inspect(const uint8_t *dump,
+                                             uintptr_t dump_len);
+
+/**
+ * Processes minidump bytes with request-scoped Breakpad symbols.
+ *
+ * Missing symbol files are allowed and produce a partial stackwalk. Every
+ * supplied symbol file must match a loaded module by debug file and debug
+ * identifier. All input pointers are borrowed for this synchronous call.
+ * The returned JSON string is owned and must be released with
+ * `symbolic_str_free`.
+ */
+struct SymbolicStr symbolic_minidump_process(const uint8_t *dump,
+                                             uintptr_t dump_len,
+                                             const struct SymbolicMinidumpSymbol *symbols,
+                                             uintptr_t symbols_len);
+
+/**
  * Creates a proguard mapping view from a path.
  */
 struct SymbolicProguardMapper *symbolic_proguardmapper_open(const char *path,
@@ -629,7 +687,13 @@ struct SymbolicProguardCache *symbolic_proguardcache_from_mapping(const uint8_t 
                                                                   uintptr_t len);
 
 /**
- * Parses a ProguardCache from its binary representation.
+ * Parses a ProguardCache from its binary representation without taking
+ * ownership of the pointer.
+ *
+ * The cache borrows `bytes` for its entire lifetime; it is not copied. The
+ * caller must keep the buffer alive and at a fixed address until the cache
+ * is released with `symbolic_proguardcache_free`. This mirrors
+ * `symbolic_symcache_from_bytes`.
  */
 struct SymbolicProguardCache *symbolic_proguardcache_open(const uint8_t *bytes,
                                                           uintptr_t len);
