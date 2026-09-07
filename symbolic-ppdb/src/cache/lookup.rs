@@ -53,6 +53,37 @@ impl<'data> PortablePdbCache<'data> {
         })
     }
 
+    /// Looks up line information for the first sequence point of a function in the cache.
+    ///
+    /// Unlike [`lookup`](Self::lookup), this does not require an IL offset. It is meant for
+    /// callers that only have a function/method index available (e.g. `func_idx`, encoded as
+    /// described on [`lookup`](Self::lookup)) and no meaningful IL offset to look up -- for
+    /// instance, stack frames captured from ahead-of-time compiled code, where the IL offset is
+    /// not available at capture time.
+    ///
+    /// This intentionally does not delegate to `lookup(func_idx, 0)`: hidden sequence points are
+    /// stripped when the cache is built, so a function's first surviving sequence point is not
+    /// guaranteed to start at IL offset 0. `lookup`'s "nearest preceding" fallback searches
+    /// backwards from an exact-offset miss, so passing 0 for a function whose first real range
+    /// starts above 0 walks into the *previous* function's last range and returns `None` instead
+    /// of this function's actual first range.
+    pub fn lookup_first(&self, func_idx: u32) -> Option<LineInfo<'data>> {
+        let start = self.ranges.partition_point(|range| range.func_idx < func_idx);
+        let range = self.ranges.get(start)?;
+        if range.func_idx != func_idx {
+            return None;
+        }
+
+        let sl = self.source_locations.get(start)?;
+        let (file_name, file_lang) = self.get_file(sl.file_idx)?;
+
+        Some(LineInfo {
+            line: sl.line,
+            file_name,
+            file_lang,
+        })
+    }
+
     fn get_file(&self, idx: u32) -> Option<(&'data str, Language)> {
         let raw = self.files.get(idx as usize)?;
         let name = self.get_string(raw.name_offset)?;
