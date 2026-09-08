@@ -189,7 +189,9 @@ ffi_fn! {
     unsafe fn symbolic_portablepdbcache_lookup_result_free(result: *mut SymbolicPortablePdbLookupResult) {
         if !result.is_null() {
             let result = &*result;
-            Vec::from_raw_parts(result.items, result.len, result.len);
+            if !result.items.is_null() {
+                Vec::from_raw_parts(result.items, result.len, result.len);
+            }
         }
     }
 }
