@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::slice;
 
@@ -6,10 +7,12 @@ use futures_executor::block_on;
 use minidump::{Minidump, MinidumpModuleList, MinidumpSystemInfo, Module};
 use minidump_processor::process_minidump;
 use minidump_unwind::symbols::{
-    FileError, FileKind, FillSymbolError, FrameSymbolizer, FrameWalker, SymbolProvider, SymbolStats,
+    FileError, FileKind, FillSymbolError, FrameSymbolizer, FrameWalker, SymbolFile, SymbolProvider,
+    SymbolStats,
 };
 use serde::Serialize;
-use symbolic::common::DebugId;
+use symbolic::cfi::CfiCache;
+use symbolic::common::{ByteView, DebugId};
 use symbolic::symcache::SymCache;
 
 use crate::core::SymbolicStr;
@@ -18,6 +21,19 @@ use crate::core::SymbolicStr;
 #[repr(C)]
 pub struct SymbolicMinidumpSymCache {
     /// Complete serialized symbolic symcache contents.
+    pub contents: *const u8,
+    /// Number of bytes in `contents`.
+    pub contents_len: usize,
+}
+
+/// One request-scoped CFI cache supplied by the caller.
+#[repr(C)]
+pub struct SymbolicMinidumpCfiCache {
+    /// Breakpad-formatted debug identifier used to match the cache to a module.
+    pub debug_id: *const u8,
+    /// Number of bytes in `debug_id`.
+    pub debug_id_len: usize,
+    /// Complete serialized symbolic CFI cache contents.
     pub contents: *const u8,
     /// Number of bytes in `contents`.
     pub contents_len: usize,
@@ -80,8 +96,14 @@ struct SymCacheInput<'a> {
     contents: &'a [u8],
 }
 
+struct CfiCacheInput<'a> {
+    debug_id: DebugId,
+    contents: &'a [u8],
+}
+
 struct InMemorySymCacheProvider<'a> {
     caches: HashMap<DebugId, SymCache<'a>>,
+    cfi_caches: HashMap<DebugId, SymbolFile>,
     stats: HashMap<String, SymbolStats>,
 }
 
@@ -118,11 +140,11 @@ impl SymbolProvider for InMemorySymCacheProvider<'_> {
 
     async fn walk_frame(
         &self,
-        _module: &(dyn Module + Sync),
-        _walker: &mut (dyn FrameWalker + Send),
+        module: &(dyn Module + Sync),
+        walker: &mut (dyn FrameWalker + Send),
     ) -> Option<()> {
-        // Symcaches contain symbol and source mappings, but not unwind CFI.
-        None
+        let debug_id = module.debug_identifier()?;
+        self.cfi_caches.get(&debug_id)?.walk_frame(module, walker)
     }
 
     async fn get_file_path(
@@ -180,7 +202,11 @@ fn inspect(dump: &[u8]) -> Result<String, MinidumpError> {
     .map_err(|error| MinidumpError::new(MinidumpErrorKind::Internal, error.to_string()))
 }
 
-fn process(dump_bytes: &[u8], symcaches: &[SymCacheInput<'_>]) -> Result<String, MinidumpError> {
+fn process(
+    dump_bytes: &[u8],
+    symcaches: &[SymCacheInput<'_>],
+    cfi_caches: &[CfiCacheInput<'_>],
+) -> Result<String, MinidumpError> {
     let dump = Minidump::read(dump_bytes).map_err(|error| {
         MinidumpError::new(MinidumpErrorKind::InvalidMinidump, error.to_string())
     })?;
@@ -216,6 +242,47 @@ fn process(dump_bytes: &[u8], symcaches: &[SymCacheInput<'_>]) -> Result<String,
         }
     }
 
+    let mut cfi_by_debug_id = HashMap::with_capacity(cfi_caches.len());
+    for supplied in cfi_caches {
+        let cache =
+            CfiCache::from_bytes(ByteView::from_slice(supplied.contents)).map_err(|error| {
+                MinidumpError::new(
+                    MinidumpErrorKind::InvalidSymbols,
+                    format!("invalid CFI cache: {error}"),
+                )
+            })?;
+        let symbol_file =
+            SymbolFile::parse(Cursor::new(cache.as_slice()), |_| ()).map_err(|error| {
+                MinidumpError::new(
+                    MinidumpErrorKind::InvalidSymbols,
+                    format!("invalid CFI cache contents: {error}"),
+                )
+            })?;
+
+        let matches_module = modules
+            .iter()
+            .any(|module| module.debug_identifier() == Some(supplied.debug_id));
+        if !matches_module {
+            return Err(MinidumpError::new(
+                MinidumpErrorKind::InvalidSymbols,
+                format!(
+                    "CFI cache debug ID {} did not match a minidump module",
+                    supplied.debug_id
+                ),
+            ));
+        }
+
+        if cfi_by_debug_id
+            .insert(supplied.debug_id, symbol_file)
+            .is_some()
+        {
+            return Err(MinidumpError::new(
+                MinidumpErrorKind::InvalidSymbols,
+                format!("duplicate CFI cache debug ID {}", supplied.debug_id),
+            ));
+        }
+    }
+
     let stats = modules
         .iter()
         .map(|module| {
@@ -233,6 +300,7 @@ fn process(dump_bytes: &[u8], symcaches: &[SymCacheInput<'_>]) -> Result<String,
         .collect();
     let provider = InMemorySymCacheProvider {
         caches: caches_by_debug_id,
+        cfi_caches: cfi_by_debug_id,
         stats,
     };
     let state = block_on(process_minidump(&dump, &provider)).map_err(|error| {
@@ -244,6 +312,39 @@ fn process(dump_bytes: &[u8], symcaches: &[SymCacheInput<'_>]) -> Result<String,
         .map_err(|error| MinidumpError::new(MinidumpErrorKind::Internal, error.to_string()))?;
     String::from_utf8(json)
         .map_err(|error| MinidumpError::new(MinidumpErrorKind::Internal, error.to_string()))
+}
+
+unsafe fn minidump_cfi_caches<'a>(
+    cfi_caches: *const SymbolicMinidumpCfiCache,
+    cfi_caches_len: usize,
+) -> Result<Vec<CfiCacheInput<'a>>, MinidumpError> {
+    let native_cfi_caches = if cfi_caches_len == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(cfi_caches, cfi_caches_len)
+    };
+    native_cfi_caches
+        .iter()
+        .map(|cache| {
+            let debug_id = borrowed_bytes(cache.debug_id, cache.debug_id_len, "CFI debug ID")?;
+            let debug_id = std::str::from_utf8(debug_id).map_err(|error| {
+                MinidumpError::new(
+                    MinidumpErrorKind::InvalidSymbols,
+                    format!("invalid CFI debug ID encoding: {error}"),
+                )
+            })?;
+            let debug_id = DebugId::from_breakpad(debug_id).map_err(|error| {
+                MinidumpError::new(
+                    MinidumpErrorKind::InvalidSymbols,
+                    format!("invalid CFI debug ID: {error}"),
+                )
+            })?;
+            Ok(CfiCacheInput {
+                debug_id,
+                contents: borrowed_bytes(cache.contents, cache.contents_len, "CFI cache contents")?,
+            })
+        })
+        .collect()
 }
 
 unsafe fn borrowed_bytes<'a>(
@@ -320,7 +421,55 @@ ffi_fn! {
                 })
             })
             .collect::<Result<Vec<_>, MinidumpError>>()?;
-        Ok(process(dump, &symcaches)?.into())
+        Ok(process(dump, &symcaches, &[])?.into())
+    }
+}
+
+ffi_fn! {
+    /// Processes minidump bytes with request-scoped symbolic symcaches and CFI caches.
+    ///
+    /// CFI caches provide unwind information while symcaches provide function and
+    /// source mappings. Every supplied cache must match a loaded module by debug ID.
+    /// All input pointers are borrowed for this synchronous call.
+    unsafe fn symbolic_minidump_process_with_cfi(
+        dump: *const u8,
+        dump_len: usize,
+        symcaches: *const SymbolicMinidumpSymCache,
+        symcaches_len: usize,
+        cfi_caches: *const SymbolicMinidumpCfiCache,
+        cfi_caches_len: usize,
+    ) -> Result<SymbolicStr> {
+        if dump.is_null()
+            || dump_len == 0
+            || (symcaches.is_null() && symcaches_len != 0)
+            || (cfi_caches.is_null() && cfi_caches_len != 0)
+        {
+            return Err(MinidumpError::new(
+                MinidumpErrorKind::InvalidArgument,
+                "minidump input or symbol cache arrays are invalid",
+            ).into());
+        }
+
+        let dump = slice::from_raw_parts(dump, dump_len);
+        let native_symcaches = if symcaches_len == 0 {
+            &[]
+        } else {
+            slice::from_raw_parts(symcaches, symcaches_len)
+        };
+        let symcaches = native_symcaches
+            .iter()
+            .map(|symcache| {
+                Ok(SymCacheInput {
+                    contents: borrowed_bytes(
+                        symcache.contents,
+                        symcache.contents_len,
+                        "symcache contents",
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, MinidumpError>>()?;
+        let cfi_caches = minidump_cfi_caches(cfi_caches, cfi_caches_len)?;
+        Ok(process(dump, &symcaches, &cfi_caches)?.into())
     }
 }
 
@@ -334,6 +483,7 @@ mod tests {
     use symbolic::symcache::SymCacheConverter;
 
     const CRASH_LINUX: &[u8] = include_bytes!("../../py/tests/res/minidump/crash_linux.dmp");
+    const CRASH_LINUX_CFI: &[u8] = include_bytes!("../../py/tests/res/minidump/crash_linux.sym");
 
     fn symcache_from_breakpad(contents: &[u8]) -> Vec<u8> {
         let object = Object::parse(contents).expect("Breakpad fixture must parse");
@@ -377,7 +527,7 @@ mod tests {
 
     #[test]
     fn process_returns_stable_json_without_symbols() {
-        let json = process(CRASH_LINUX, &[]).expect("fixture must be stackwalkable");
+        let json = process(CRASH_LINUX, &[], &[]).expect("fixture must be stackwalkable");
         let report: Value = serde_json::from_str(&json).expect("stackwalk result must be JSON");
 
         assert_eq!(report["status"], "OK");
@@ -400,7 +550,7 @@ mod tests {
             .expect("fixture must contain crash_linux");
         let debug_file = module.debug_file().unwrap().into_owned();
 
-        let baseline = process(CRASH_LINUX, &[]).expect("fixture must be stackwalkable");
+        let baseline = process(CRASH_LINUX, &[], &[]).expect("fixture must be stackwalkable");
         let baseline: Value = serde_json::from_str(&baseline).expect("stackwalk must be JSON");
         let frame = &baseline["crashing_thread"]["frames"][0];
         assert_eq!(basename(frame["module"].as_str().unwrap()), "crash_linux");
@@ -422,6 +572,7 @@ mod tests {
             &[SymCacheInput {
                 contents: &symcache,
             }],
+            &[],
         )
         .expect("matching in-memory symcache must be accepted");
         let report: Value = serde_json::from_str(&json).expect("stackwalk result must be JSON");
@@ -434,6 +585,50 @@ mod tests {
             "crash_linux.cc"
         );
         assert_eq!(report["crashing_thread"]["frames"][0]["line"], 42);
+    }
+
+    #[test]
+    fn process_unwinds_with_matching_in_memory_cfi_cache() {
+        let dump = Minidump::read(CRASH_LINUX).expect("fixture must be a valid minidump");
+        let modules = dump
+            .get_stream::<MinidumpModuleList>()
+            .expect("fixture must contain modules");
+        let module = modules
+            .iter()
+            .find(|module| basename(&module.code_file()) == "crash_linux")
+            .expect("fixture must contain crash_linux");
+        let debug_id = module
+            .debug_identifier()
+            .expect("module must have a debug ID");
+
+        let baseline = process(CRASH_LINUX, &[], &[]).expect("fixture must be stackwalkable");
+        let baseline: Value = serde_json::from_str(&baseline).expect("stackwalk must be JSON");
+        let baseline_frames = baseline["crashing_thread"]["frames"]
+            .as_array()
+            .expect("crashing thread must contain frames");
+
+        let json = process(
+            CRASH_LINUX,
+            &[],
+            &[CfiCacheInput {
+                debug_id,
+                contents: CRASH_LINUX_CFI,
+            }],
+        )
+        .expect("matching in-memory CFI cache must be accepted");
+        let report: Value = serde_json::from_str(&json).expect("stackwalk result must be JSON");
+        let cfi_frames = report["crashing_thread"]["frames"]
+            .as_array()
+            .expect("crashing thread must contain frames");
+
+        assert!(!baseline_frames.iter().any(|frame| frame["trust"] == "cfi"));
+        assert_eq!(
+            cfi_frames
+                .iter()
+                .filter(|frame| frame["trust"] == "cfi")
+                .count(),
+            3
+        );
     }
 
     #[test]
