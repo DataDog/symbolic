@@ -101,6 +101,11 @@ typedef struct SymbolicIL2CPPLineMapping SymbolicIL2CPPLineMapping;
 typedef struct SymbolicObject SymbolicObject;
 
 /**
+ * Represents a PortablePdbCache.
+ */
+typedef struct SymbolicPortablePdbCache SymbolicPortablePdbCache;
+
+/**
  * Represents a ProguardCache.
  */
 typedef struct SymbolicProguardCache SymbolicProguardCache;
@@ -219,6 +224,27 @@ typedef struct SymbolicMinidumpCfiCache {
    */
   uintptr_t contents_len;
 } SymbolicMinidumpCfiCache;
+
+/**
+ * Line information for a single lookup result.
+ */
+typedef struct SymbolicPortablePdbLineInfo {
+  uint32_t line;
+  struct SymbolicStr file_name;
+  struct SymbolicStr file_lang;
+} SymbolicPortablePdbLineInfo;
+
+/**
+ * The result of a PortablePdbCache lookup.
+ *
+ * `len` is `0` if the lookup found no matching line information, and `1` otherwise. This
+ * mirrors `SymbolicProguardRemapResult`'s array convention rather than using a separate
+ * found/not-found flag.
+ */
+typedef struct SymbolicPortablePdbLookupResult {
+  struct SymbolicPortablePdbLineInfo *items;
+  uintptr_t len;
+} SymbolicPortablePdbLookupResult;
 
 /**
  * Represents a Java Stack Frame.
@@ -644,6 +670,80 @@ struct SymbolicStr symbolic_minidump_process_with_cfi(const uint8_t *dump,
                                                       uintptr_t symcaches_len,
                                                       const struct SymbolicMinidumpCfiCache *cfi_caches,
                                                       uintptr_t cfi_caches_len);
+
+/**
+ * Builds a PortablePdbCache from the bytes of a raw Portable PDB file.
+ *
+ * The resulting object holds the compiled binary representation in memory. Use
+ * `symbolic_portablepdbcache_get_bytes` / `symbolic_portablepdbcache_get_size` to retrieve
+ * those bytes for upload to blob storage, then free the object with
+ * `symbolic_portablepdbcache_free`. To load a previously-compiled cache use
+ * `symbolic_portablepdbcache_open` instead.
+ */
+struct SymbolicPortablePdbCache *symbolic_portablepdbcache_from_portable_pdb(const uint8_t *bytes,
+                                                                             uintptr_t len);
+
+/**
+ * Parses a PortablePdbCache from its binary representation without taking ownership of the
+ * pointer.
+ *
+ * The cache borrows `bytes` for its entire lifetime; it is not copied. The caller must keep
+ * the buffer alive and at a fixed address until the cache is released with
+ * `symbolic_portablepdbcache_free`.
+ */
+struct SymbolicPortablePdbCache *symbolic_portablepdbcache_open(const uint8_t *bytes,
+                                                                uintptr_t len);
+
+/**
+ * Returns a pointer to the raw bytes of the PortablePdbCache binary.
+ *
+ * The pointer is valid for the lifetime of the cache object. Use
+ * `symbolic_portablepdbcache_get_size` for the byte count.
+ */
+const uint8_t *symbolic_portablepdbcache_get_bytes(const struct SymbolicPortablePdbCache *cache);
+
+/**
+ * Returns the size in bytes of the PortablePdbCache binary.
+ */
+uintptr_t symbolic_portablepdbcache_get_size(const struct SymbolicPortablePdbCache *cache);
+
+/**
+ * Frees a PortablePdbCache.
+ */
+void symbolic_portablepdbcache_free(struct SymbolicPortablePdbCache *cache);
+
+/**
+ * Looks up line information for a (method token, IL offset) coordinate.
+ *
+ * `func_idx` is the (1-based) index of the function in the ECMA-335 `MethodDef` table, as
+ * encoded in .NET's `MemberInfo.MetadataToken`. `il_offset` is the offset from the start of
+ * the method's Intermediate Language code, as obtained via `StackFrame.GetILOffset`.
+ *
+ * Returns a result with `len == 0` if no line information is found for this coordinate. Use
+ * `symbolic_portablepdbcache_lookup_first` when no IL offset is available at all. Free the
+ * result with `symbolic_portablepdbcache_lookup_result_free`.
+ */
+struct SymbolicPortablePdbLookupResult symbolic_portablepdbcache_lookup(const struct SymbolicPortablePdbCache *cache,
+                                                                        uint32_t func_idx,
+                                                                        uint32_t il_offset);
+
+/**
+ * Looks up line information for the first sequence point of a function, without an IL
+ * offset.
+ *
+ * Intended for frames that carry a method token but no meaningful IL offset (e.g. frames
+ * captured from ahead-of-time compiled code). Returns a result with `len == 0` if the
+ * function has no sequence points in the cache. Free the result with
+ * `symbolic_portablepdbcache_lookup_result_free`.
+ */
+struct SymbolicPortablePdbLookupResult symbolic_portablepdbcache_lookup_first(const struct SymbolicPortablePdbCache *cache,
+                                                                              uint32_t func_idx);
+
+/**
+ * Frees a lookup result produced by `symbolic_portablepdbcache_lookup` or
+ * `symbolic_portablepdbcache_lookup_first`.
+ */
+void symbolic_portablepdbcache_lookup_result_free(struct SymbolicPortablePdbLookupResult *result);
 
 /**
  * Creates a proguard mapping view from a path.
