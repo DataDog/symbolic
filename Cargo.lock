@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "addr2line"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "anyhow",
  "clap",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "debuginfo_debug"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "anyhow",
  "clap",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "dump_cfi"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "anyhow",
  "clap",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "dump_sources"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "clap",
  "symbolic",
@@ -1340,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "minidump_stackwalk"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "async-trait",
  "clap",
@@ -1489,7 +1489,7 @@ dependencies = [
 
 [[package]]
 name = "object_debug"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "clap",
  "symbolic",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "sourcemapcache_debug"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "anyhow",
  "clap",
@@ -2449,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "symbolic-cfi",
  "symbolic-common",
@@ -2464,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-cabi"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2482,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-cfi"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "insta",
  "similar-asserts",
@@ -2494,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-common"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "debugid",
  "memmap2",
@@ -2508,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-debuginfo"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "criterion",
  "debugid",
@@ -2544,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-demangle"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "cc",
  "cpp_demangle",
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-il2cpp"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "indexmap",
  "serde_json",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-ppdb"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "flate2",
  "indexmap",
@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-sourcemapcache"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "itertools 0.14.0",
  "js-source-scopes",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "symbolic-symcache"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "criterion",
  "indexmap",
@@ -2612,11 +2612,11 @@ dependencies = [
 
 [[package]]
 name = "symbolic-testutils"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 
 [[package]]
 name = "symbolic-unreal"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "anylog",
  "bytes",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "symcache_debug"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "anyhow",
  "clap",
@@ -2917,7 +2917,7 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unreal_engine_crash"
-version = "12.17.6-dd"
+version = "12.17.8-dd"
 dependencies = [
  "clap",
  "symbolic",
