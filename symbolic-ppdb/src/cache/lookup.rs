@@ -70,7 +70,9 @@ impl<'data> PortablePdbCache<'data> {
     /// into the *previous* function's last range, silently returning wrong line information
     /// instead of this function's actual first range.
     pub fn lookup_first(&self, func_idx: u32) -> Option<LineInfo<'data>> {
-        let start = self.ranges.partition_point(|range| range.func_idx < func_idx);
+        let start = self
+            .ranges
+            .partition_point(|range| range.func_idx < func_idx);
         let range = self.ranges.get(start)?;
         if range.func_idx != func_idx {
             return None;

@@ -204,6 +204,28 @@ typedef struct SymbolicMinidumpSymCache {
 } SymbolicMinidumpSymCache;
 
 /**
+ * One request-scoped CFI cache supplied by the caller.
+ */
+typedef struct SymbolicMinidumpCfiCache {
+  /**
+   * Breakpad-formatted debug identifier used to match the cache to a module.
+   */
+  const uint8_t *debug_id;
+  /**
+   * Number of bytes in `debug_id`.
+   */
+  uintptr_t debug_id_len;
+  /**
+   * Complete serialized symbolic CFI cache contents.
+   */
+  const uint8_t *contents;
+  /**
+   * Number of bytes in `contents`.
+   */
+  uintptr_t contents_len;
+} SymbolicMinidumpCfiCache;
+
+/**
  * Line information for a single lookup result.
  */
 typedef struct SymbolicPortablePdbLineInfo {
@@ -634,6 +656,20 @@ struct SymbolicStr symbolic_minidump_process(const uint8_t *dump,
                                              uintptr_t dump_len,
                                              const struct SymbolicMinidumpSymCache *symcaches,
                                              uintptr_t symcaches_len);
+
+/**
+ * Processes minidump bytes with request-scoped symbolic symcaches and CFI caches.
+ *
+ * CFI caches provide unwind information while symcaches provide function and
+ * source mappings. Every supplied cache must match a loaded module by debug ID.
+ * All input pointers are borrowed for this synchronous call.
+ */
+struct SymbolicStr symbolic_minidump_process_with_cfi(const uint8_t *dump,
+                                                      uintptr_t dump_len,
+                                                      const struct SymbolicMinidumpSymCache *symcaches,
+                                                      uintptr_t symcaches_len,
+                                                      const struct SymbolicMinidumpCfiCache *cfi_caches,
+                                                      uintptr_t cfi_caches_len);
 
 /**
  * Builds a PortablePdbCache from the bytes of a raw Portable PDB file.
