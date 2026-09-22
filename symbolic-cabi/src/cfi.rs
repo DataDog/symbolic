@@ -10,6 +10,41 @@ use crate::utils::ForeignObject;
 /// Contains stack frame information (CFI) for an image.
 pub struct SymbolicCfiCache;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minidump_unwind::SymbolFile;
+    use std::io::Cursor;
+    use symbolic::debuginfo::Object;
+
+    #[test]
+    fn exported_native_pe_cfi_can_be_loaded_by_minidump_reader() {
+        let object = Object::parse(include_bytes!(
+            "../../symbolic-testutils/fixtures/windows/CrashWithException.exe"
+        ))
+        .unwrap();
+        let generated = CfiCache::from_object(&object).unwrap();
+        unsafe {
+            let cache = SymbolicCfiCache::from_rust(generated);
+            let bytes = std::slice::from_raw_parts(
+                symbolic_cficache_get_bytes(cache),
+                symbolic_cficache_get_size(cache),
+            );
+            assert!(bytes.starts_with(b"MODULE windows "));
+            let loaded = CfiCache::from_bytes(ByteView::from_slice(bytes)).unwrap();
+            SymbolFile::parse(Cursor::new(loaded.as_slice()), |_| ()).unwrap();
+            symbolic_cficache_free(cache);
+        }
+    }
+
+    #[test]
+    fn malformed_module_record_is_rejected_by_symbol_parser() {
+        let cache = CfiCache::from_bytes(ByteView::from_slice(b"MODULE windows broken\n"))
+            .expect("recognized raw format");
+        assert!(SymbolFile::parse(Cursor::new(cache.as_slice()), |_| ()).is_err());
+    }
+}
+
 impl ForeignObject for SymbolicCfiCache {
     type RustObject = CfiCache<'static>;
 }

@@ -10,6 +10,46 @@ use similar_asserts::assert_eq;
 type Error = Box<dyn std::error::Error>;
 
 #[test]
+fn generated_cfi_roundtrips_exported_bytes() -> Result<(), Error> {
+    for path in [
+        "windows/CrashWithException.exe",
+        "windows/crash.pdb",
+        "windows/crash.sym",
+        "linux/crash",
+        "macos/crash",
+    ] {
+        let buffer = ByteView::open(fixture(path))?;
+        let object = Object::parse(&buffer)?;
+        let generated = CfiCache::from_object(&object)?;
+        let exported = generated.as_slice();
+        if path.ends_with(".exe") {
+            assert!(exported.starts_with(b"MODULE windows "));
+        }
+        let raw = CfiCache::from_bytes(ByteView::from_slice(exported))?;
+        assert_eq!(raw.as_slice(), exported);
+        assert_eq!(raw.version(), 1);
+
+        let mut serialized = Vec::new();
+        generated.write_to(&mut serialized)?;
+        let versioned = CfiCache::from_bytes(ByteView::from_slice(&serialized))?;
+        assert_eq!(versioned.version(), generated.version());
+        assert_eq!(versioned.as_slice(), exported);
+    }
+    Ok(())
+}
+
+#[test]
+fn invalid_cfi_magic_is_rejected() {
+    for input in [
+        b"not a cache".as_slice(),
+        b"MODULEwindows x86_64",
+        b"MODULE ",
+    ] {
+        assert!(CfiCache::from_bytes(ByteView::from_slice(input)).is_err());
+    }
+}
+
+#[test]
 fn load_empty_cfi_cache() -> Result<(), Error> {
     let buffer = ByteView::from_slice(&[]);
     let cache = CfiCache::from_bytes(buffer)?;

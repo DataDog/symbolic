@@ -1299,9 +1299,14 @@ fn write_preamble<W: Write>(mut writer: W, version: u32) -> Result<(), io::Error
 }
 
 impl<'a> CfiCache<'a> {
-    /// Load a symcache from a `ByteView`.
+    /// Load a CFI cache from a `ByteView`.
     pub fn from_bytes(byteview: ByteView<'a>) -> Result<Self, CfiError> {
-        if byteview.is_empty() || byteview.starts_with(b"STACK") {
+        // The C API exposes as_slice(), without the versioned preamble. Native
+        // PE caches include a MODULE record before their STACK records.
+        if byteview.is_empty()
+            || byteview.starts_with(b"STACK")
+            || byteview.starts_with(b"MODULE windows ")
+        {
             let inner = CfiCacheInner::Unversioned(CfiCacheV1 { byteview });
             return Ok(CfiCache { inner });
         }
