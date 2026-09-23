@@ -125,7 +125,19 @@ impl SymbolProvider for InMemorySymCacheProvider<'_> {
         let outermost_function = outermost.function();
         let function_base = module.base_address() + u64::from(outermost_function.entry_pc());
 
-        frame.set_function(outermost_function.name(), function_base, 0);
+        // STACK WIN argument sizes are needed when unwinding the caller's
+        // frame on x86. Symcaches do not retain this information; use the
+        // accompanying CFI cache, following breakpad-symbols' precedence.
+        let parameter_size = self
+            .cfi_caches
+            .get(&debug_id)
+            .and_then(|cfi| {
+                cfi.win_stack_framedata_info
+                    .get(relative_address)
+                    .or_else(|| cfi.win_stack_fpo_info.get(relative_address))
+            })
+            .map_or(0, |info| info.parameter_size);
+        frame.set_function(outermost_function.name(), function_base, parameter_size);
         if let Some(file) = outermost.file() {
             frame.set_source_file(&file.full_path(), outermost.line(), function_base);
         }
@@ -496,6 +508,40 @@ mod tests {
             .serialize(&mut Cursor::new(&mut symcache))
             .expect("symcache must serialize");
         symcache
+    }
+
+    #[test]
+    fn process_preserves_x86_stack_win_argument_sizes() {
+        let dump =
+            include_bytes!("../../symbolic-testutils/fixtures/windows/local-unwind/fixture.dmp");
+        let symbols =
+            include_bytes!("../../symbolic-testutils/fixtures/windows/local-unwind/fixture.sym");
+        let symcache = symcache_from_breakpad(symbols);
+        let object = Object::parse(symbols).unwrap();
+        let cfi = CfiCache::from_object(&object).unwrap();
+        let supplied_cfi = CfiCacheInput {
+            debug_id: object.debug_id(),
+            contents: cfi.as_slice(),
+        };
+        let json = process(
+            dump,
+            &[SymCacheInput {
+                contents: &symcache,
+            }],
+            &[supplied_cfi],
+        )
+        .unwrap();
+        let report: Value = serde_json::from_str(&json).unwrap();
+        let frames = report["threads"][0]["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 3);
+        for (frame, name) in frames
+            .iter()
+            .zip(["crash_frame(int)", "caller_frame(int)", "entry()"])
+        {
+            assert_eq!(frame["function"], name);
+        }
+        assert_eq!(frames[1]["trust"], "cfi");
+        assert_eq!(frames[2]["trust"], "cfi");
     }
 
     #[test]
