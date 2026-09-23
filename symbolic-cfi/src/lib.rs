@@ -43,8 +43,10 @@ use symbolic_debuginfo::{Object, ObjectError, ObjectLike};
 
 /// The magic file preamble to identify cficache files.
 ///
-/// Files with version < 2 do not have the full preamble with magic+version, but rather start
-/// straight away with a `STACK` record.
+/// Files with version < 2 do not have the full preamble with magic+version.
+/// Raw payloads exported through the C API also omit this preamble, even when
+/// generated from a versioned cache. Unversioned payloads can be empty, start
+/// with a `STACK` record, or start with a `MODULE windows ` record for PE caches.
 /// The magic here is a `u32` corresponding to the big-endian `CFIC`.
 /// It will be written and read using native endianness, so mismatches between writer/reader will
 /// result in a [`CfiErrorKind::BadFileMagic`] error.
