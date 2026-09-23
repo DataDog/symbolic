@@ -43,8 +43,10 @@ use symbolic_debuginfo::{Object, ObjectError, ObjectLike};
 
 /// The magic file preamble to identify cficache files.
 ///
-/// Files with version < 2 do not have the full preamble with magic+version, but rather start
-/// straight away with a `STACK` record.
+/// Files with version < 2 do not have the full preamble with magic+version.
+/// Raw payloads exported through the C API also omit this preamble, even when
+/// generated from a versioned cache. Unversioned payloads can be empty, start
+/// with a `STACK` record, or start with a `MODULE windows ` record for PE caches.
 /// The magic here is a `u32` corresponding to the big-endian `CFIC`.
 /// It will be written and read using native endianness, so mismatches between writer/reader will
 /// result in a [`CfiErrorKind::BadFileMagic`] error.
@@ -1299,9 +1301,14 @@ fn write_preamble<W: Write>(mut writer: W, version: u32) -> Result<(), io::Error
 }
 
 impl<'a> CfiCache<'a> {
-    /// Load a symcache from a `ByteView`.
+    /// Load a CFI cache from a `ByteView`.
     pub fn from_bytes(byteview: ByteView<'a>) -> Result<Self, CfiError> {
-        if byteview.is_empty() || byteview.starts_with(b"STACK") {
+        // The C API exposes as_slice(), without the versioned preamble. Native
+        // PE caches include a MODULE record before their STACK records.
+        if byteview.is_empty()
+            || byteview.starts_with(b"STACK")
+            || byteview.starts_with(b"MODULE windows ")
+        {
             let inner = CfiCacheInner::Unversioned(CfiCacheV1 { byteview });
             return Ok(CfiCache { inner });
         }
