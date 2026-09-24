@@ -125,7 +125,21 @@ impl SymbolProvider for InMemorySymCacheProvider<'_> {
         let outermost_function = outermost.function();
         let function_base = module.base_address() + u64::from(outermost_function.entry_pc());
 
-        frame.set_function(outermost_function.name(), function_base, 0);
+        // Follow SymbolFile::fill_symbol: STACK WIN frame-data takes precedence
+        // over FPO for argument sizes needed by x86 unwinding. This is driven by
+        // the supplied records, not the host platform. Ordinary STACK CFI records
+        // have neither table entry and retain the previous zero fallback because
+        // symcaches do not preserve argument sizes.
+        let parameter_size = self
+            .cfi_caches
+            .get(&debug_id)
+            .and_then(|cfi| {
+                cfi.win_stack_framedata_info
+                    .get(relative_address)
+                    .or_else(|| cfi.win_stack_fpo_info.get(relative_address))
+            })
+            .map_or(0, |info| info.parameter_size);
+        frame.set_function(outermost_function.name(), function_base, parameter_size);
         if let Some(file) = outermost.file() {
             frame.set_source_file(&file.full_path(), outermost.line(), function_base);
         }
@@ -496,6 +510,169 @@ mod tests {
             .serialize(&mut Cursor::new(&mut symcache))
             .expect("symcache must serialize");
         symcache
+    }
+
+    #[test]
+    fn process_preserves_x86_stack_win_argument_sizes() {
+        let dump =
+            include_bytes!("../../symbolic-testutils/fixtures/windows/local-unwind/fixture.dmp");
+        let symbols =
+            include_bytes!("../../symbolic-testutils/fixtures/windows/local-unwind/fixture.sym");
+        let symcache = symcache_from_breakpad(symbols);
+        let object = Object::parse(symbols).unwrap();
+        let cfi = CfiCache::from_object(&object).unwrap();
+        let supplied_cfi = CfiCacheInput {
+            debug_id: object.debug_id(),
+            contents: cfi.as_slice(),
+        };
+        let json = process(
+            dump,
+            &[SymCacheInput {
+                contents: &symcache,
+            }],
+            &[supplied_cfi],
+        )
+        .unwrap();
+        let report: Value = serde_json::from_str(&json).unwrap();
+        let frames = report["threads"][0]["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 3);
+        for (frame, name) in frames
+            .iter()
+            .zip(["crash_frame(int)", "caller_frame(int)", "entry()"])
+        {
+            assert_eq!(frame["function"], name);
+        }
+        assert_eq!(frames[1]["trust"], "cfi");
+        assert_eq!(frames[2]["trust"], "cfi");
+    }
+
+    fn check_non_windows_symbols_and_cfi(
+        dump_bytes: &[u8],
+        debug_bytes: &[u8],
+        cfi_bytes: &[u8],
+        expected: &[(&str, u64, &str)],
+        source_file: &str,
+    ) {
+        let object = Object::parse(debug_bytes).unwrap();
+        let debug_id = object.debug_id();
+        let mut converter = SymCacheConverter::new();
+        converter.process_object(&object).unwrap();
+        let mut contents = Vec::new();
+        converter.serialize(&mut contents).unwrap();
+        let cache = SymCache::parse(&contents).unwrap();
+        let dump = Minidump::read(dump_bytes).unwrap();
+        let modules = dump.get_stream::<MinidumpModuleList>().unwrap();
+        let module = modules
+            .iter()
+            .find(|m| m.debug_identifier() == Some(debug_id))
+            .unwrap();
+        let parsed_cfi = SymbolFile::parse(Cursor::new(cfi_bytes), |_| ()).unwrap();
+        assert!(parsed_cfi.win_stack_framedata_info.is_empty());
+        assert!(parsed_cfi.win_stack_fpo_info.is_empty());
+        let report: Value = serde_json::from_str(
+            &process(
+                dump_bytes,
+                &[SymCacheInput {
+                    contents: &contents,
+                }],
+                &[CfiCacheInput {
+                    debug_id,
+                    contents: cfi_bytes,
+                }],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let frames = report["crashing_thread"]["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[3]["trust"], "cfi");
+        assert_eq!(frames[4]["trust"], "scan");
+        let application: Vec<_> = frames
+            .iter()
+            .filter(|f| f["module"].as_str().map(basename) == Some(basename(&module.code_file())))
+            .collect();
+        assert_eq!(application.len(), expected.len());
+        for (frame, (function, line, trust)) in application.iter().zip(expected) {
+            assert_eq!(frame["function"], *function);
+            assert_eq!(frame["line"], *line);
+            assert_eq!(frame["trust"], *trust);
+            assert_eq!(basename(frame["file"].as_str().unwrap()), source_file);
+        }
+
+        let mut provider = InMemorySymCacheProvider {
+            caches: HashMap::from([(debug_id, cache)]),
+            cfi_caches: HashMap::new(),
+            stats: HashMap::new(),
+        };
+        let relative = u64::from_str_radix(
+            application[0]["module_offset"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+            16,
+        )
+        .unwrap();
+        for with_cfi in [false, true] {
+            if with_cfi {
+                provider.cfi_caches.insert(
+                    debug_id,
+                    SymbolFile::parse(Cursor::new(cfi_bytes), |_| ()).unwrap(),
+                );
+            }
+            let mut frame = ParameterSizeFrame {
+                instruction: module.base_address() + relative,
+                parameter_size: None,
+            };
+            block_on(provider.fill_symbol(module, &mut frame)).unwrap();
+            assert_eq!(frame.parameter_size, Some(0));
+        }
+    }
+
+    struct ParameterSizeFrame {
+        instruction: u64,
+        parameter_size: Option<u32>,
+    }
+    impl FrameSymbolizer for ParameterSizeFrame {
+        fn get_instruction(&self) -> u64 {
+            self.instruction
+        }
+        fn set_function(&mut self, _: &str, _: u64, parameter_size: u32) {
+            self.parameter_size = Some(parameter_size);
+        }
+        fn set_source_file(&mut self, _: &str, _: u32, _: u64) {}
+    }
+
+    #[test]
+    fn process_linux_with_symbols_and_cfi_preserves_stack() {
+        check_non_windows_symbols_and_cfi(
+            CRASH_LINUX,
+            include_bytes!("../../py/tests/res/minidump/crash_linux"),
+            CRASH_LINUX_CFI,
+            &[
+                ("_ZN12_GLOBAL__N_15crashEv", 21, "context"),
+                ("_ZN12_GLOBAL__N_15startEv", 25, "cfi"),
+                ("main", 33, "cfi"),
+                ("_ZN12_GLOBAL__N_15startEv", 26, "scan"),
+            ],
+            "crash_linux.cpp",
+        );
+    }
+
+    #[test]
+    fn process_macos_with_symbols_and_cfi_preserves_stack() {
+        check_non_windows_symbols_and_cfi(
+            include_bytes!("../../py/tests/res/minidump/crash_macos.dmp"),
+            include_bytes!(
+                "../../py/tests/res/minidump/crash_macos.dSYM/Contents/Resources/DWARF/crash_macos"
+            ),
+            include_bytes!("../../py/tests/res/minidump/crash_macos.sym"),
+            &[
+                ("_ZN12_GLOBAL__N_15crashEv", 19, "context"),
+                ("_ZN12_GLOBAL__N_15startEv", 23, "cfi"),
+                ("main", 29, "cfi"),
+            ],
+            "crash_macos.cpp",
+        );
     }
 
     #[test]
