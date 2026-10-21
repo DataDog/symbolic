@@ -1,5 +1,4 @@
 mod from_object;
-use std::convert::TryInto;
 
 use indexmap::IndexSet;
 use std::collections::HashMap;

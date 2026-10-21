@@ -204,27 +204,6 @@ typedef struct SymbolicMinidumpSymCache {
 } SymbolicMinidumpSymCache;
 
 /**
- * Line information for a single lookup result.
- */
-typedef struct SymbolicPortablePdbLineInfo {
-  uint32_t line;
-  struct SymbolicStr file_name;
-  struct SymbolicStr file_lang;
-} SymbolicPortablePdbLineInfo;
-
-/**
- * The result of a PortablePdbCache lookup.
- *
- * `len` is `0` if the lookup found no matching line information, and `1` otherwise. This
- * mirrors `SymbolicProguardRemapResult`'s array convention rather than using a separate
- * found/not-found flag.
- */
-typedef struct SymbolicPortablePdbLookupResult {
-  struct SymbolicPortablePdbLineInfo *items;
-  uintptr_t len;
-} SymbolicPortablePdbLookupResult;
-
-/**
  * One request-scoped CFI cache supplied by the caller.
  */
 typedef struct SymbolicMinidumpCfiCache {
@@ -245,6 +224,27 @@ typedef struct SymbolicMinidumpCfiCache {
    */
   uintptr_t contents_len;
 } SymbolicMinidumpCfiCache;
+
+/**
+ * Line information for a single lookup result.
+ */
+typedef struct SymbolicPortablePdbLineInfo {
+  uint32_t line;
+  struct SymbolicStr file_name;
+  struct SymbolicStr file_lang;
+} SymbolicPortablePdbLineInfo;
+
+/**
+ * The result of a PortablePdbCache lookup.
+ *
+ * `len` is `0` if the lookup found no matching line information, and `1` otherwise. This
+ * mirrors `SymbolicProguardRemapResult`'s array convention rather than using a separate
+ * found/not-found flag.
+ */
+typedef struct SymbolicPortablePdbLookupResult {
+  struct SymbolicPortablePdbLineInfo *items;
+  uintptr_t len;
+} SymbolicPortablePdbLookupResult;
 
 /**
  * Represents a Java Stack Frame.
@@ -658,6 +658,20 @@ struct SymbolicStr symbolic_minidump_process(const uint8_t *dump,
                                              uintptr_t symcaches_len);
 
 /**
+ * Processes minidump bytes with request-scoped symbolic symcaches and CFI caches.
+ *
+ * CFI caches provide unwind information while symcaches provide function and
+ * source mappings. Every supplied cache must match a loaded module by debug ID.
+ * All input pointers are borrowed for this synchronous call.
+ */
+struct SymbolicStr symbolic_minidump_process_with_cfi(const uint8_t *dump,
+                                                      uintptr_t dump_len,
+                                                      const struct SymbolicMinidumpSymCache *symcaches,
+                                                      uintptr_t symcaches_len,
+                                                      const struct SymbolicMinidumpCfiCache *cfi_caches,
+                                                      uintptr_t cfi_caches_len);
+
+/**
  * Builds a PortablePdbCache from the bytes of a raw Portable PDB file.
  *
  * The resulting object holds the compiled binary representation in memory. Use
@@ -730,20 +744,6 @@ struct SymbolicPortablePdbLookupResult symbolic_portablepdbcache_lookup_first(co
  * `symbolic_portablepdbcache_lookup_first`.
  */
 void symbolic_portablepdbcache_lookup_result_free(struct SymbolicPortablePdbLookupResult *result);
-
-/**
- * Processes minidump bytes with request-scoped symbolic symcaches and CFI caches.
- *
- * CFI caches provide unwind information while symcaches provide function and
- * source mappings. Every supplied cache must match a loaded module by debug ID.
- * All input pointers are borrowed for this synchronous call.
- */
-struct SymbolicStr symbolic_minidump_process_with_cfi(const uint8_t *dump,
-                                                      uintptr_t dump_len,
-                                                      const struct SymbolicMinidumpSymCache *symcaches,
-                                                      uintptr_t symcaches_len,
-                                                      const struct SymbolicMinidumpCfiCache *cfi_caches,
-                                                      uintptr_t cfi_caches_len);
 
 /**
  * Creates a proguard mapping view from a path.
