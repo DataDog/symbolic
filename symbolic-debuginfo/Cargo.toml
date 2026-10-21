@@ -1,6 +1,6 @@
 [package]
 name = "symbolic-debuginfo"
-version = "12.17.10-dd"
+version = "13.9.0-dd"
 license = "MIT"
 authors = [
     "Armin Ronacher <armin.ronacher@active-4.com>",
@@ -45,7 +45,6 @@ elf = [
     "goblin/elf64",
     "goblin/std",
     "scroll",
-    "zstd",
 ]
 # Mach-o processing
 macho = [
@@ -81,7 +80,7 @@ sourcebundle = [
     "debugid/serde",
 ]
 # JavaScript stuff
-js = []
+js = ["dep:memchr"]
 # WASM processing
 wasm = ["dwarf", "wasmparser"]
 
@@ -93,6 +92,7 @@ fallible-iterator = { workspace = true }
 flate2 = { workspace = true, optional = true }
 gimli = { workspace = true, optional = true }
 goblin = { workspace = true, optional = true }
+memchr = { workspace = true, optional = true }
 once_cell = { workspace = true, optional = true }
 nom = { workspace = true, optional = true }
 nom-supreme = { workspace = true, optional = true }
@@ -104,12 +104,13 @@ serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 smallvec = { workspace = true, optional = true }
 srcsrv = { version = "0.2", optional = true }
-symbolic-common = { version = "12.17.10-dd", path = "../symbolic-common" }
-symbolic-ppdb = { version = "12.17.10-dd", path = "../symbolic-ppdb", optional = true }
+symbolic-common = { version = "13.9.0-dd", path = "../symbolic-common" }
+symbolic-ppdb = { version = "13.9.0-dd", path = "../symbolic-ppdb", optional = true }
 thiserror = { workspace = true }
 wasmparser = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
-zstd = { workspace = true, optional = true }
+
+zstd = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

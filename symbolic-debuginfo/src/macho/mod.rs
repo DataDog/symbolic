@@ -13,6 +13,7 @@ use symbolic_common::{Arch, AsSelf, CodeId, DebugId, Uuid};
 
 use crate::base::*;
 use crate::dwarf::{Dwarf, DwarfDebugSession, DwarfError, DwarfSection, Endian};
+use crate::ParseObjectOptions;
 pub(crate) use mono_archive::{MonoArchive, MonoArchiveObjects};
 
 mod bcsymbolmap;
@@ -385,7 +386,7 @@ impl<'d> Parse<'d> for MachObject<'d> {
         Self::test(data)
     }
 
-    fn parse(data: &'d [u8]) -> Result<Self, MachError> {
+    fn parse_with_opts(data: &'d [u8], _opts: ParseObjectOptions) -> Result<Self, Self::Error> {
         Self::parse(data)
     }
 }
@@ -475,10 +476,33 @@ impl<'data> Dwarf<'data> for MachObject<'data> {
                             return None;
                         }
 
+                        let (data, offset) = if self.macho.is_64 {
+                            // The section header's `offset` field is only 32 bits wide, so for
+                            // files larger than 4 GiB (e.g. produced with thin LTO) it is
+                            // truncated and the section data goblin slices out is wrong. Recompute
+                            // the real 64-bit file offset from the enclosing segment's `fileoff`
+                            // and `vmaddr`, which are both 64-bit, and re-slice the file data.
+                            header
+                                .addr
+                                .checked_sub(segment.vmaddr)
+                                .and_then(|rel| rel.checked_add(segment.fileoff))
+                                .and_then(|file_offset| {
+                                    let start = usize::try_from(file_offset).ok()?;
+                                    let len = usize::try_from(header.size).ok()?;
+                                    let end = start.checked_add(len)?;
+                                    Some((self.data.get(start..end)?, file_offset))
+                                })
+                                // Fall back to the data goblin provided if the segment-relative
+                                // computation is out of bounds or overflows.
+                                .unwrap_or((data, u64::from(header.offset)))
+                        } else {
+                            (data, u64::from(header.offset))
+                        };
+
                         return Some(DwarfSection {
                             data: Cow::Borrowed(data),
                             address: header.addr,
-                            offset: u64::from(header.offset),
+                            offset,
                             align: u64::from(header.align),
                         });
                     }
@@ -562,6 +586,7 @@ pub struct FatMachObjectIterator<'d, 'a> {
     iter: mach::FatArchIterator<'a>,
     remaining: usize,
     data: &'d [u8],
+    opts: ParseObjectOptions,
 }
 
 impl<'d> Iterator for FatMachObjectIterator<'d, '_> {
@@ -577,7 +602,10 @@ impl<'d> Iterator for FatMachObjectIterator<'d, '_> {
             Some(Ok(arch)) => {
                 let start = (arch.offset as usize).min(self.data.len());
                 let end = (arch.offset as usize + arch.size as usize).min(self.data.len());
-                Some(MachObject::parse(&self.data[start..end]))
+                Some(MachObject::parse_with_opts(
+                    &self.data[start..end],
+                    self.opts,
+                ))
             }
             Some(Err(error)) => Some(Err(MachError::new(error))),
             None => None,
@@ -593,11 +621,10 @@ impl std::iter::FusedIterator for FatMachObjectIterator<'_, '_> {}
 impl ExactSizeIterator for FatMachObjectIterator<'_, '_> {}
 
 /// A fat MachO container that hosts one or more [`MachObject`]s.
-///
-/// [`MachObject`]: struct.MachObject.html
 pub struct FatMachO<'d> {
     fat: mach::MultiArch<'d>,
     data: &'d [u8],
+    opts: ParseObjectOptions,
 }
 
 impl<'d> FatMachO<'d> {
@@ -608,8 +635,13 @@ impl<'d> FatMachO<'d> {
 
     /// Tries to parse a fat MachO container from the given slice.
     pub fn parse(data: &'d [u8]) -> Result<Self, MachError> {
+        Self::parse_with_opts(data, Default::default())
+    }
+
+    /// Tries to parse a fat MachO container from the given slice.
+    pub fn parse_with_opts(data: &'d [u8], opts: ParseObjectOptions) -> Result<Self, MachError> {
         mach::MultiArch::new(data)
-            .map(|fat| FatMachO { fat, data })
+            .map(|fat| FatMachO { fat, data, opts })
             .map_err(MachError::new)
     }
 
@@ -619,6 +651,7 @@ impl<'d> FatMachO<'d> {
             iter: self.fat.iter_arches(),
             remaining: self.fat.narches,
             data: self.data,
+            opts: self.opts,
         }
     }
 
@@ -639,7 +672,7 @@ impl<'d> FatMachO<'d> {
 
         let start = (arch.offset as usize).min(self.data.len());
         let end = (arch.offset as usize + arch.size as usize).min(self.data.len());
-        MachObject::parse(&self.data[start..end]).map(Some)
+        MachObject::parse_with_opts(&self.data[start..end], self.opts).map(Some)
     }
 }
 
@@ -749,12 +782,17 @@ impl<'d> MachArchive<'d> {
         }
     }
 
-    /// Tries to parse a Mach archive from the given slice.
+    /// Tries to parse a Mach archive from the given slice, with default options.
     pub fn parse(data: &'d [u8]) -> Result<Self, MachError> {
+        Self::parse_with_opts(data, Default::default())
+    }
+
+    /// Tries to parse a Mach archive from the given slice.
+    pub fn parse_with_opts(data: &'d [u8], opts: ParseObjectOptions) -> Result<Self, MachError> {
         Ok(Self(match Self::is_fat(data) {
-            Some(true) => MachArchiveInner::Archive(FatMachO::parse(data)?),
+            Some(true) => MachArchiveInner::Archive(FatMachO::parse_with_opts(data, opts)?),
             // Fall back to mach parsing to receive a meaningful error message from goblin
-            _ => MachArchiveInner::Single(MonoArchive::new(data)),
+            _ => MachArchiveInner::Single(MonoArchive::new(data, opts)),
         }))
     }
 

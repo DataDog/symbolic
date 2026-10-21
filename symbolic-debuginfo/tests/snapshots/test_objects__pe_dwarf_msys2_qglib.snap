@@ -19,7 +19,7 @@ Pe(
         load_address: 0x180000000,
         has_symbols: false,
         has_debug_info: true,
-        has_unwind_info: true,
+        has_unwind_info: false,
         is_malformed: false,
     },
 )

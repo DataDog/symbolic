@@ -124,6 +124,26 @@ impl Error for ObjectError {
     }
 }
 
+/// Options for parsing object files.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParseObjectOptions {
+    /// The maximum uncompressed size for compressed debug file sections.
+    ///
+    /// This is only relevant to ELF objects.
+    pub max_decompressed_section_size: Option<usize>,
+
+    /// The maximum uncompressed size for comprossed source files embedded in an object file.
+    ///
+    /// This is only relevant for source bundles and PPDB objects.
+    pub max_decompressed_embedded_source_size: Option<usize>,
+
+    /// The maximum inline nesting depth to process.
+    ///
+    /// This is only relevant for Breakpad objects (for the time being).
+    pub max_inline_depth: Option<u32>,
+}
+
 /// Tries to infer the object type from the start of the given buffer.
 ///
 /// If `archive` is set to `true`, multi architecture objects will be allowed. Otherwise, only
@@ -206,11 +226,19 @@ impl<'data> Object<'data> {
         peek(data, false)
     }
 
-    /// Tries to parse a supported object from the given slice.
+    /// Tries to parse a supported object from the given slice, with default options.
     pub fn parse(data: &'data [u8]) -> Result<Self, ObjectError> {
+        Self::parse_with_opts(data, Default::default())
+    }
+
+    /// Tries to parse a supported object from the given slice.
+    pub fn parse_with_opts(
+        data: &'data [u8],
+        opts: ParseObjectOptions,
+    ) -> Result<Self, ObjectError> {
         macro_rules! parse_object {
             ($kind:ident, $file:ident, $data:expr) => {
-                Object::$kind($file::parse(data).map_err(ObjectError::transparent)?)
+                Object::$kind($file::parse_with_opts(data, opts).map_err(ObjectError::transparent)?)
             };
         }
 
@@ -370,6 +398,14 @@ impl<'data> Object<'data> {
 
 impl<'slf, 'data: 'slf> AsSelf<'slf> for Object<'data> {
     type Ref = Object<'slf>;
+
+    fn as_self(&'slf self) -> &'slf Self::Ref {
+        unsafe { std::mem::transmute(self) }
+    }
+}
+
+impl<'slf, 'data: 'slf> AsSelf<'slf> for ObjectDebugSession<'data> {
+    type Ref = ObjectDebugSession<'slf>;
 
     fn as_self(&'slf self) -> &'slf Self::Ref {
         unsafe { std::mem::transmute(self) }
@@ -617,7 +653,7 @@ impl<'data> Iterator for SymbolIterator<'data, '_> {
 impl<'data> crate::base::Parse<'data> for PortablePdb<'data> {
     type Error = symbolic_ppdb::FormatError;
 
-    fn parse(data: &'data [u8]) -> Result<Self, Self::Error> {
+    fn parse_with_opts(data: &'data [u8], _opts: ParseObjectOptions) -> Result<Self, Self::Error> {
         Self::parse(data)
     }
 
@@ -657,22 +693,31 @@ impl<'d> Archive<'d> {
         peek(data, true)
     }
 
-    /// Tries to parse a generic archive from the given slice.
+    /// Tries to parse a generic archive from the given slice, with default options.
     pub fn parse(data: &'d [u8]) -> Result<Self, ObjectError> {
+        Self::parse_with_opts(data, Default::default())
+    }
+
+    /// Tries to parse a generic archive from the given slice.
+    pub fn parse_with_opts(data: &'d [u8], opts: ParseObjectOptions) -> Result<Self, ObjectError> {
         let archive = match Self::peek(data) {
-            FileFormat::Breakpad => Archive(ArchiveInner::Breakpad(MonoArchive::new(data))),
-            FileFormat::Elf => Archive(ArchiveInner::Elf(MonoArchive::new(data))),
+            FileFormat::Breakpad => Archive(ArchiveInner::Breakpad(MonoArchive::new(data, opts))),
+            FileFormat::Elf => Archive(ArchiveInner::Elf(MonoArchive::new(data, opts))),
             FileFormat::MachO => {
-                let inner = MachArchive::parse(data)
+                let inner = MachArchive::parse_with_opts(data, opts)
                     .map(ArchiveInner::MachO)
                     .map_err(ObjectError::transparent)?;
                 Archive(inner)
             }
-            FileFormat::Pdb => Archive(ArchiveInner::Pdb(MonoArchive::new(data))),
-            FileFormat::Pe => Archive(ArchiveInner::Pe(MonoArchive::new(data))),
-            FileFormat::SourceBundle => Archive(ArchiveInner::SourceBundle(MonoArchive::new(data))),
-            FileFormat::Wasm => Archive(ArchiveInner::Wasm(MonoArchive::new(data))),
-            FileFormat::PortablePdb => Archive(ArchiveInner::PortablePdb(MonoArchive::new(data))),
+            FileFormat::Pdb => Archive(ArchiveInner::Pdb(MonoArchive::new(data, opts))),
+            FileFormat::Pe => Archive(ArchiveInner::Pe(MonoArchive::new(data, opts))),
+            FileFormat::SourceBundle => {
+                Archive(ArchiveInner::SourceBundle(MonoArchive::new(data, opts)))
+            }
+            FileFormat::Wasm => Archive(ArchiveInner::Wasm(MonoArchive::new(data, opts))),
+            FileFormat::PortablePdb => {
+                Archive(ArchiveInner::PortablePdb(MonoArchive::new(data, opts)))
+            }
             FileFormat::Unknown => {
                 return Err(ObjectError::new(ObjectErrorRepr::UnsupportedObject))
             }
