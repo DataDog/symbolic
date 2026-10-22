@@ -55,11 +55,11 @@ type RangeLists<'a> = gimli::read::RangeLists<Slice<'a>>;
 type Unit<'a> = gimli::read::Unit<Slice<'a>>;
 type DwarfInner<'a> = gimli::read::Dwarf<Slice<'a>>;
 
-type Die<'d, 'u> = gimli::read::DebuggingInformationEntry<'u, 'u, Slice<'d>, usize>;
+type Die<'d> = gimli::read::DebuggingInformationEntry<Slice<'d>, usize>;
 type Attribute<'a> = gimli::read::Attribute<Slice<'a>>;
 type UnitOffset = gimli::read::UnitOffset<usize>;
 type DebugInfoOffset = gimli::DebugInfoOffset<usize>;
-type EntriesRaw<'d, 'u> = gimli::EntriesRaw<'u, 'u, Slice<'d>>;
+type EntriesRaw<'d, 'u> = gimli::EntriesRaw<'u, Slice<'d>>;
 
 type UnitHeader<'a> = gimli::read::UnitHeader<Slice<'a>>;
 type IncompleteLineNumberProgram<'a> = gimli::read::IncompleteLineProgram<Slice<'a>>;
@@ -338,21 +338,51 @@ impl<'d> DwarfLineProgram<'d> {
         }
     }
 
+    /// Finds the first sequence which contains rows overlapping with the specified `range`.
+    ///
+    ///
+    /// ```text
+    ///       ┌─────────────────────────────────────────────────┐┌───────────────────────┐
+    ///       │┌─────────────────┐┌───┐┌──────────────────────┐ ││┌─────────────────────┐│
+    ///       ││Row 1            ││ 2 ││Row 3                 │ │││Row X                ││
+    ///       │└─────────────────┘└───┘└──────────────────────┘ ││└─────────────────────┘│
+    ///       └─────────────────────────────────────────────────┘└───────────────────────┘
+    ///
+    ///                             ├────────────────────────┘ Range A
+    ///                             └────────────────────────┬────────┘ Range B
+    /// └────────────────────────────────────────────────────┘ Range C
+    /// ```
+    ///
+    /// Range `A` and `B` yield rows 2 and 3, range `C` yields all rows of the sequence,
+    /// `1`, `2`, and `3`.
     pub fn get_rows(&self, range: &Range) -> &[DwarfRow] {
         for seq in &self.sequences {
-            if seq.end <= range.begin || seq.start > range.end {
+            if range.begin >= seq.end || seq.start >= range.end {
                 continue;
             }
 
             let from = match seq.rows.binary_search_by_key(&range.begin, |x| x.address) {
                 Ok(idx) => idx,
-                Err(0) => continue,
+                // If the range begins before the sequence, we clamp it to the beginning of the
+                // sequence as a range determined by the low and high pc may include a function
+                // prologue which is not mapped into the addr/line matrix.
+                //
+                // Since the sequences are ordered by address, this can only happen if the beginning
+                // of the range is not part of another sequence already.
+                Err(0) => 0,
                 Err(next_idx) => next_idx - 1,
             };
 
             let len = seq.rows[from..]
                 .binary_search_by_key(&range.end, |x| x.address)
+                // Similarly here, we clamp the end of the range to the end of the sequence.
+                //
+                // There is a potential argument to be made that a range can span multiple
+                // sequences, the spec isn't entirely clear about whether this is possible.
+                //
+                // For the moment we haven't observed any such case.
                 .unwrap_or_else(|e| e);
+
             return &seq.rows[from..from + len];
         }
         &[]
@@ -389,7 +419,7 @@ impl<'d> UnitRef<'d, '_> {
     /// abbrev can only be temporarily accessed in the callback.
     fn resolve_reference<T, F>(&self, attr: Attribute<'d>, f: F) -> Result<Option<T>, DwarfError>
     where
-        F: FnOnce(Self, &Die<'d, '_>) -> Result<Option<T>, DwarfError>,
+        F: FnOnce(Self, &Die<'d>) -> Result<Option<T>, DwarfError>,
     {
         let (unit, offset) = match attr.value() {
             AttributeValue::UnitRef(offset) => (*self, offset),
@@ -413,19 +443,63 @@ impl<'d> UnitRef<'d, '_> {
         self.unit.header.offset()
     }
 
+    /// Returns the source language declared in the root DIE of this compilation unit.
+    fn language(&self) -> Result<Option<Language>, DwarfError> {
+        let mut entries = self.unit.entries();
+        let Some(root_entry) = entries.next_dfs()? else {
+            return Ok(None);
+        };
+        let Some(AttributeValue::Language(lang)) = root_entry.attr_value(constants::DW_AT_language)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(language_from_dwarf(lang)))
+    }
+
+    /// Maximum recursion depth for following `DW_AT_abstract_origin` chains, matching the limit
+    /// used by elfutils `dwarf_attr_integrate`.
+    const MAX_ABSTRACT_ORIGIN_DEPTH: u8 = 16;
+
+    /// Resolves the source language for a DIE by following `DW_AT_abstract_origin` chains,
+    /// including across compilation unit boundaries. `depth` limits recursion to guard against
+    /// cycles or malformed DWARF.
+    fn resolve_entry_language(
+        &self,
+        entry: &Die<'d>,
+        depth: u8,
+    ) -> Result<Option<Language>, DwarfError> {
+        if depth == 0 {
+            return Ok(None);
+        }
+        if let Some(attr) = entry.attr(constants::DW_AT_abstract_origin) {
+            return self.resolve_reference(*attr, |ref_unit, ref_entry| {
+                // Recurse first to follow deeper chains.
+                if let Some(lang) = ref_unit.resolve_entry_language(ref_entry, depth - 1)? {
+                    return Ok(Some(lang));
+                }
+                // No deeper reference: use the CU language if this is a cross-unit ref.
+                if self.offset() != ref_unit.offset() {
+                    ref_unit.language()
+                } else {
+                    Ok(None)
+                }
+            });
+        }
+        Ok(None)
+    }
+
     /// Resolves the function name of a debug entry.
     fn resolve_function_name(
         &self,
-        entry: &Die<'d, '_>,
+        entry: &Die<'d>,
         language: Language,
         bcsymbolmap: Option<&'d BcSymbolMap<'d>>,
         prior_offset: Option<UnitOffset>,
     ) -> Result<Option<Name<'d>>, DwarfError> {
-        let mut attrs = entry.attrs();
         let mut fallback_name = None;
         let mut reference_target = None;
 
-        while let Some(attr) = attrs.next()? {
+        for attr in entry.attrs() {
             match attr.name() {
                 // Prioritize these. If we get them, take them.
                 constants::DW_AT_linkage_name | constants::DW_AT_MIPS_linkage_name => {
@@ -452,8 +526,8 @@ impl<'d> UnitRef<'d, '_> {
         }
 
         if let Some(attr) = reference_target {
-            return self.resolve_reference(attr, |ref_unit, ref_entry| {
-                // Self-references may have a layer of indircetion. Avoid infinite recursion
+            return self.resolve_reference(*attr, |ref_unit, ref_entry| {
+                // Self-references may have a layer of indirection. Avoid infinite recursion
                 // in this scenario.
                 if let Some(prior) = prior_offset {
                     if self.offset() == ref_unit.offset() && prior == ref_entry.offset() {
@@ -498,7 +572,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
         let inner = UnitRef { info, unit };
         let mut entries = unit.entries();
         let entry = match entries.next_dfs()? {
-            Some((_, entry)) => entry,
+            Some(entry) => entry,
             None => return Err(gimli::read::Error::MissingUnitDie.into()),
         };
 
@@ -508,12 +582,12 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
         // range information has not been written yet and all units look like this.
         if info.kind != ObjectKind::Relocatable
             && unit.low_pc == 0
-            && entry.attr(constants::DW_AT_ranges)?.is_none()
+            && entry.attr(constants::DW_AT_ranges).is_none()
         {
             return Ok(None);
         }
 
-        let language = match entry.attr_value(constants::DW_AT_language)? {
+        let language = match entry.attr_value(constants::DW_AT_language) {
             Some(AttributeValue::Language(lang)) => language_from_dwarf(lang),
             _ => Language::Unknown,
         };
@@ -527,7 +601,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
         // reference into the debug_str section. We use `string_value`
         // to resolve it correctly in either case.
         let producer = entry
-            .attr_value(constants::DW_AT_producer)?
+            .attr_value(constants::DW_AT_producer)
             .and_then(|av| av.string_value(&info.inner.debug_str));
 
         // Trust the symbol table more to contain accurate mangled names. However, since Dart's name
@@ -580,7 +654,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
                     AttributeValue::DebugAddrIndex(index) => {
                         low_pc = Some(self.inner.info.address(self.inner.unit, index)?)
                     }
-                    _ => return Err(GimliError::UnsupportedAttributeForm.into()),
+                    _ => return Err(GimliError::UnsupportedAttributeForm(attr.form()).into()),
                 },
                 constants::DW_AT_high_pc => match attr.value() {
                     AttributeValue::Addr(addr) => high_pc = Some(addr),
@@ -588,15 +662,15 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
                         high_pc = Some(self.inner.info.address(self.inner.unit, index)?)
                     }
                     AttributeValue::Udata(size) => high_pc_rel = Some(size),
-                    _ => return Err(GimliError::UnsupportedAttributeForm.into()),
+                    _ => return Err(GimliError::UnsupportedAttributeForm(attr.form()).into()),
                 },
                 constants::DW_AT_call_line => match attr.value() {
                     AttributeValue::Udata(line) => call_line = Some(line),
-                    _ => return Err(GimliError::UnsupportedAttributeForm.into()),
+                    _ => return Err(GimliError::UnsupportedAttributeForm(attr.form()).into()),
                 },
                 constants::DW_AT_call_file => match attr.value() {
                     AttributeValue::FileIndex(file) => call_file = Some(file),
-                    _ => return Err(GimliError::UnsupportedAttributeForm.into()),
+                    _ => return Err(GimliError::UnsupportedAttributeForm(attr.form()).into()),
                 },
                 constants::DW_AT_ranges
                 | constants::DW_AT_rnglists_base
@@ -610,7 +684,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
                                 // are triggered by an inverted range (going high to low).
                                 // See a few more examples of broken ranges here:
                                 // https://github.com/emscripten-core/emscripten/issues/15552
-                                Err(gimli::Error::InvalidAddressRange) => None,
+                                Err(gimli::Error::InvalidCfiSetLoc(_)) => None,
                                 Err(err) => {
                                     return Err(err.into());
                                 }
@@ -719,18 +793,25 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
     }
 
     /// Resolves the name of a function from the symbol table.
-    fn resolve_symbol_name(&self, address: u64) -> Option<Name<'d>> {
+    fn resolve_symbol_name(&self, address: u64, language: Language) -> Option<Name<'d>> {
         let symbol = self.inner.info.symbol_map.lookup_exact(address)?;
         let name = resolve_cow_name(self.bcsymbolmap, symbol.name.clone()?);
-        Some(Name::new(name, NameMangling::Mangled, self.language))
+        Some(Name::new(name, NameMangling::Mangled, language))
     }
 
-    /// Resolves the name of a function from DWARF debug information.
-    fn resolve_dwarf_name(&self, entry: &Die<'d, '_>) -> Option<Name<'d>> {
+    /// Resolves the source language for a function by following `DW_AT_abstract_origin` to the
+    /// origin compilation unit when crossing unit boundaries.
+    ///
+    /// With LTO, the linker may create artificial compilation units whose `DW_AT_language`
+    /// does not reflect the original source language (e.g., a C++ CU containing functions
+    /// originally written in C). When such a CU's subprogram carries a cross-unit
+    /// `DW_AT_abstract_origin`, the referenced CU's language is more authoritative.
+    fn resolve_function_language(&self, entry: &Die<'d>, fallback_language: Language) -> Language {
         self.inner
-            .resolve_function_name(entry, self.language, self.bcsymbolmap, None)
+            .resolve_entry_language(entry, UnitRef::MAX_ABSTRACT_ORIGIN_DEPTH)
             .ok()
             .flatten()
+            .unwrap_or(fallback_language)
     }
 
     /// Parses any DW_TAG_subprogram DIEs in the DIE subtree.
@@ -814,17 +895,29 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
         //
         // XXX: Maybe we should actually parse the ranges in the resolve function and always
         // look at the symbol table based on the start of the DIE range.
+
+        let entry = self.inner.unit.entry(dw_die_offset)?;
+        // With LTO the current CU may be an artificial unit with an incorrect language. Follow
+        // DW_AT_abstract_origin cross-unit to find the true source language. The resolved
+        // language is also propagated to all inlinees of this function.
+        let language = self.resolve_function_language(&entry, self.language);
+
         let symbol_name = if self.prefer_dwarf_names {
             None
         } else {
             let first_range_begin = ranges.iter().map(|range| range.begin).min().unwrap();
             let function_address = offset(first_range_begin, self.inner.info.address_offset);
-            self.resolve_symbol_name(function_address)
+            self.resolve_symbol_name(function_address, language)
         };
 
         let name = symbol_name
-            .or_else(|| self.resolve_dwarf_name(&self.inner.unit.entry(dw_die_offset).unwrap()))
-            .unwrap_or_else(|| Name::new("", NameMangling::Unmangled, self.language));
+            .or_else(|| {
+                self.inner
+                    .resolve_function_name(&entry, language, self.bcsymbolmap, None)
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| Name::new("", NameMangling::Unmangled, language));
 
         // Create one function per range. In the common case there is only one range, so
         // we usually only have one function builder here.
@@ -840,7 +933,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
             })
             .collect();
 
-        self.parse_function_children(depth, 0, entries, &mut builders, output)?;
+        self.parse_function_children(depth, 0, entries, &mut builders, output, language)?;
 
         if let Some(line_program) = &self.line_program {
             for (range, builder) in &mut builders {
@@ -869,6 +962,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
         entries: &mut EntriesRaw<'d, '_>,
         builders: &mut [(Range, FunctionBuilder<'d>)],
         output: &mut FunctionsOutput<'_, 'd>,
+        language: Language,
     ) -> Result<(), DwarfError> {
         while !entries.is_empty() {
             let dw_die_offset = entries.next_offset();
@@ -882,6 +976,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
             };
             match abbrev.tag() {
                 constants::DW_TAG_subprogram => {
+                    // Nested subprograms resolve their own language independently.
                     self.parse_function(dw_die_offset, next_depth, entries, abbrev, output)?;
                 }
                 constants::DW_TAG_inlined_subroutine => {
@@ -893,6 +988,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
                         abbrev,
                         builders,
                         output,
+                        language,
                     )?;
                 }
                 _ => {
@@ -921,6 +1017,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
         abbrev: &gimli::Abbreviation,
         builders: &mut [(Range, FunctionBuilder<'d>)],
         output: &mut FunctionsOutput<'_, 'd>,
+        language: Language,
     ) -> Result<(), DwarfError> {
         let (ranges, call_location) = self.parse_ranges(entries, abbrev, &mut output.range_buf)?;
 
@@ -937,9 +1034,18 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
             return self.parse_functions(depth, entries, output);
         }
 
+        let entry = self.inner.unit.entry(dw_die_offset)?;
+        let language = self.resolve_function_language(&entry, language);
+
+        // Use the language resolved for the enclosing top-level subprogram rather than
+        // self.language: the inlinee's DW_AT_abstract_origin may resolve to a partial unit
+        // which carries the wrong language (e.g. a C++ LTO partial unit for C code).
         let name = self
-            .resolve_dwarf_name(&self.inner.unit.entry(dw_die_offset).unwrap())
-            .unwrap_or_else(|| Name::new("", NameMangling::Unmangled, self.language));
+            .inner
+            .resolve_function_name(&entry, language, self.bcsymbolmap, None)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| Name::new("", NameMangling::Unmangled, language));
 
         let call_file = call_location
             .call_file
@@ -970,7 +1076,7 @@ impl<'d, 'a> DwarfUnit<'d, 'a> {
             );
         }
 
-        self.parse_function_children(depth, inline_depth + 1, entries, builders, output)
+        self.parse_function_children(depth, inline_depth + 1, entries, builders, output, language)
     }
 
     /// Collects all functions within this compilation unit.
@@ -1093,10 +1199,13 @@ struct DwarfSections<'data> {
     debug_info: DwarfSectionData<'data, gimli::read::DebugInfo<Slice<'data>>>,
     debug_line: DwarfSectionData<'data, gimli::read::DebugLine<Slice<'data>>>,
     debug_line_str: DwarfSectionData<'data, gimli::read::DebugLineStr<Slice<'data>>>,
+    debug_names: DwarfSectionData<'data, gimli::read::DebugNames<Slice<'data>>>,
     debug_str: DwarfSectionData<'data, gimli::read::DebugStr<Slice<'data>>>,
     debug_str_offsets: DwarfSectionData<'data, gimli::read::DebugStrOffsets<Slice<'data>>>,
     debug_ranges: DwarfSectionData<'data, gimli::read::DebugRanges<Slice<'data>>>,
     debug_rnglists: DwarfSectionData<'data, gimli::read::DebugRngLists<Slice<'data>>>,
+    debug_macinfo: DwarfSectionData<'data, gimli::read::DebugMacinfo<Slice<'data>>>,
+    debug_macro: DwarfSectionData<'data, gimli::read::DebugMacro<Slice<'data>>>,
 }
 
 impl<'data> DwarfSections<'data> {
@@ -1112,10 +1221,13 @@ impl<'data> DwarfSections<'data> {
             debug_info: DwarfSectionData::load(dwarf),
             debug_line: DwarfSectionData::load(dwarf),
             debug_line_str: DwarfSectionData::load(dwarf),
+            debug_names: DwarfSectionData::load(dwarf),
             debug_str: DwarfSectionData::load(dwarf),
             debug_str_offsets: DwarfSectionData::load(dwarf),
             debug_ranges: DwarfSectionData::load(dwarf),
             debug_rnglists: DwarfSectionData::load(dwarf),
+            debug_macinfo: DwarfSectionData::load(dwarf),
+            debug_macro: DwarfSectionData::load(dwarf),
         }
     }
 }
@@ -1153,9 +1265,12 @@ impl<'d> DwarfInfo<'d> {
             debug_info: sections.debug_info.to_gimli(),
             debug_line: sections.debug_line.to_gimli(),
             debug_line_str: sections.debug_line_str.to_gimli(),
+            debug_names: sections.debug_names.to_gimli(),
             debug_str: sections.debug_str.to_gimli(),
             debug_str_offsets: sections.debug_str_offsets.to_gimli(),
             debug_types: Default::default(),
+            debug_macinfo: sections.debug_macinfo.to_gimli(),
+            debug_macro: sections.debug_macro.to_gimli(),
             locations: Default::default(),
             ranges: RangeLists::new(
                 sections.debug_ranges.to_gimli(),
@@ -1167,7 +1282,7 @@ impl<'d> DwarfInfo<'d> {
         inner.populate_abbreviations_cache(AbbreviationsCacheStrategy::Duplicates);
 
         // Prepare random access to unit headers.
-        let headers = inner.units().collect::<Vec<_>>()?;
+        let headers = FallibleIterator::collect::<Vec<_>>(inner.units())?;
         let units = headers.iter().map(|_| OnceCell::new()).collect();
 
         Ok(DwarfInfo {
@@ -1209,7 +1324,7 @@ impl<'d> DwarfInfo<'d> {
         &self,
         offset: DebugInfoOffset,
     ) -> Result<(UnitRef<'d, '_>, UnitOffset), DwarfError> {
-        let section_offset = UnitSectionOffset::DebugInfoOffset(offset);
+        let section_offset = UnitSectionOffset(offset.0);
         let search_result = self
             .headers
             .binary_search_by_key(&section_offset, UnitHeader::offset);

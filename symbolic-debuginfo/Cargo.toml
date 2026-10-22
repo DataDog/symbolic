@@ -1,6 +1,6 @@
 [package]
 name = "symbolic-debuginfo"
-version = "12.16.2"
+version = "13.9.0"
 license = "MIT"
 authors = [
     "Armin Ronacher <armin.ronacher@active-4.com>",
@@ -45,7 +45,6 @@ elf = [
     "goblin/elf64",
     "goblin/std",
     "scroll",
-    "zstd",
 ]
 # Mach-o processing
 macho = [
@@ -64,17 +63,15 @@ ms = [
     "goblin/pe32",
     "goblin/pe64",
     "goblin/std",
-    "once_cell",
     "parking_lot",
     "pdb-addr2line",
     "scroll",
     "smallvec",
+    "srcsrv",
 ]
 ppdb = ["symbolic-ppdb"]
 # Source bundle creation
 sourcebundle = [
-    "lazy_static",
-    "once_cell",
     "parking_lot",
     "regex",
     "serde_json",
@@ -83,7 +80,7 @@ sourcebundle = [
     "debugid/serde",
 ]
 # JavaScript stuff
-js = []
+js = ["dep:memchr"]
 # WASM processing
 wasm = ["dwarf", "wasmparser"]
 
@@ -95,7 +92,7 @@ fallible-iterator = { workspace = true }
 flate2 = { workspace = true, optional = true }
 gimli = { workspace = true, optional = true }
 goblin = { workspace = true, optional = true }
-lazy_static = { workspace = true, optional = true }
+memchr = { workspace = true, optional = true }
 once_cell = { workspace = true, optional = true }
 nom = { workspace = true, optional = true }
 nom-supreme = { workspace = true, optional = true }
@@ -106,12 +103,14 @@ scroll = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 smallvec = { workspace = true, optional = true }
-symbolic-common = { version = "12.16.2", path = "../symbolic-common" }
-symbolic-ppdb = { version = "12.16.2", path = "../symbolic-ppdb", optional = true }
+srcsrv = { version = "0.2", optional = true }
+symbolic-common = { version = "13.9.0", path = "../symbolic-common" }
+symbolic-ppdb = { version = "13.9.0", path = "../symbolic-ppdb", optional = true }
 thiserror = { workspace = true }
 wasmparser = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
-zstd = { workspace = true, optional = true }
+
+zstd = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

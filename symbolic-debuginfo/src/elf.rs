@@ -22,6 +22,7 @@ use symbolic_common::{Arch, AsSelf, CodeId, DebugId, Uuid};
 
 use crate::base::*;
 use crate::dwarf::{Dwarf, DwarfDebugSession, DwarfError, DwarfSection, Endian};
+use crate::ParseObjectOptions;
 
 const UUID_SIZE: usize = 16;
 const PAGE_SIZE: usize = 4096;
@@ -46,7 +47,7 @@ const EF_MIPS_ABI_EABI64: u32 = 0x0000_4000;
 /// Any flag value that might indicate 64-bit MIPS.
 const MIPS_64_FLAGS: u32 = EF_MIPS_ABI_O64 | EF_MIPS_ABI_EABI64;
 
-/// An error when dealing with [`ElfObject`](struct.ElfObject.html).
+/// An error when dealing with [`ElfObject`].
 #[derive(Debug, Error)]
 #[error("invalid ELF file")]
 pub struct ElfError {
@@ -70,6 +71,7 @@ pub struct ElfObject<'data> {
     elf: elf::Elf<'data>,
     data: &'data [u8],
     is_malformed: bool,
+    max_decompressed_section_size: Option<usize>,
 }
 
 impl<'data> ElfObject<'data> {
@@ -134,9 +136,11 @@ impl<'data> ElfObject<'data> {
         Ok(nchain)
     }
 
-    /// Tries to parse an ELF object from the given slice. Will return a partially parsed ELF object
+    /// Tries to parse an ELF object from the given slice.
+    ///
+    /// Will return a partially parsed ELF object
     /// if at least the program and section headers can be parsed.
-    pub fn parse(data: &'data [u8]) -> Result<Self, ElfError> {
+    pub fn parse_with_opts(data: &'data [u8], opts: ParseObjectOptions) -> Result<Self, ElfError> {
         let header =
             elf::Elf::parse_header(data).map_err(|_| ElfError::new("ELF header unreadable"))?;
         // dummy Elf with only header
@@ -166,6 +170,7 @@ impl<'data> ElfObject<'data> {
                         elf: obj,
                         data,
                         is_malformed: true,
+                        max_decompressed_section_size: opts.max_decompressed_section_size,
                     });
                 }
             };
@@ -207,8 +212,7 @@ impl<'data> ElfObject<'data> {
         obj.strtab = Strtab::default();
         for shdr in &obj.section_headers {
             if shdr.sh_type == elf::section_header::SHT_SYMTAB {
-                let size = shdr.sh_entsize;
-                let count = if size == 0 { 0 } else { shdr.sh_size / size };
+                let count = shdr.sh_size.checked_div(shdr.sh_entsize).unwrap_or(0);
                 obj.syms = return_partial_on_err!(elf::Symtab::parse(
                     data,
                     shdr.sh_offset as usize,
@@ -291,6 +295,29 @@ impl<'data> ElfObject<'data> {
                 return_partial_on_err!(elf::Symtab::parse(data, dyn_info.symtab, num_syms, ctx));
         }
 
+        // If the dynamic symbol table is empty, try finding a SHT_DYNSYM section in the section headers.
+        // See https://refspecs.linuxfoundation.org/LSB_2.1.0/LSB-Core-generic/LSB-Core-generic/elftypes.html:
+        //
+        // > This section holds a minimal set of symbols adequate for dynamic linking. See also SHT_SYMTAB. Currently, an object file may have either a section of SHT_SYMTAB type or a section of SHT_DYNSYM type, but not both.
+        if obj.dynsyms.is_empty() {
+            if let Some(shdr) = obj
+                .section_headers
+                .iter()
+                .find(|h| h.sh_type == elf::section_header::SHT_DYNSYM)
+            {
+                let count = shdr.sh_size.checked_div(shdr.sh_entsize).unwrap_or(0);
+                obj.dynsyms = return_partial_on_err!(elf::Symtab::parse(
+                    data,
+                    shdr.sh_offset as usize,
+                    count as usize,
+                    ctx
+                ));
+
+                obj.dynstrtab =
+                    return_partial_on_err!(get_strtab(&obj.section_headers, shdr.sh_link as usize));
+            }
+        }
+
         obj.shdr_relocs = vec![];
         for (idx, section) in obj.section_headers.iter().enumerate() {
             let is_rela = section.sh_type == elf::section_header::SHT_RELA;
@@ -327,9 +354,17 @@ impl<'data> ElfObject<'data> {
             elf: obj,
             data,
             is_malformed: false,
+            max_decompressed_section_size: opts.max_decompressed_section_size,
         })
     }
 
+    /// Tries to parse an ELF object from the given slice, with default options.
+    ///
+    /// Will return a partially parsed ELF object
+    /// if at least the program and section headers can be parsed.
+    pub fn parse(data: &'data [u8]) -> Result<Self, ElfError> {
+        Self::parse_with_opts(data, ParseObjectOptions::default())
+    }
     /// The container file format, which is always `FileFormat::Elf`.
     pub fn file_format(&self) -> FileFormat {
         FileFormat::Elf
@@ -569,7 +604,7 @@ impl<'data> ElfObject<'data> {
 
             (
                 CompressionType::Zlib,
-                u64::from_be_bytes(size_bytes),
+                u64::from_be_bytes(size_bytes) as usize,
                 &section_data[12..],
             )
         } else {
@@ -587,18 +622,22 @@ impl<'data> ElfObject<'data> {
             };
 
             let compressed = &section_data[CompressionHeader::size(context)..];
-            (ty, compression.ch_size, compressed)
+            (ty, compression.ch_size as usize, compressed)
         };
+
+        if size > self.max_decompressed_section_size.unwrap_or(usize::MAX) {
+            return None;
+        }
 
         let decompressed = match ty {
             CompressionType::Zlib => {
-                let mut decompressed = Vec::with_capacity(size as usize);
+                let mut decompressed = Vec::with_capacity(size);
                 Decompress::new(true)
                     .decompress_vec(compressed, &mut decompressed, FlushDecompress::Finish)
                     .ok()?;
                 decompressed
             }
-            CompressionType::Zstd => zstd::bulk::decompress(compressed, size as usize).ok()?,
+            CompressionType::Zstd => zstd::bulk::decompress(compressed, size).ok()?,
         };
 
         Some(decompressed)
@@ -632,7 +671,11 @@ impl<'data> ElfObject<'data> {
                 // Support this as an override to the flag.
                 let (compressed, section_name) = match section_name.strip_prefix(".z") {
                     Some(name) => (true, name),
-                    None => (header.sh_flags & SHF_COMPRESSED != 0, &section_name[1..]),
+                    None => match section_name.strip_prefix('.') {
+                        Some(name) => (header.sh_flags & SHF_COMPRESSED != 0, name),
+                        // We expect any section we look for to actually start with a `.`.
+                        None => continue,
+                    },
                 };
 
                 if section_name != name {
@@ -640,7 +683,7 @@ impl<'data> ElfObject<'data> {
                 }
 
                 let size = header.sh_size as usize;
-                let data = &self.data[offset..][..size];
+                let data = &self.data.get(offset..)?.get(..size)?;
                 let section = DwarfSection {
                     data: Cow::Borrowed(data),
                     address: header.sh_addr,
@@ -758,8 +801,8 @@ impl<'data> Parse<'data> for ElfObject<'data> {
         Self::test(data)
     }
 
-    fn parse(data: &'data [u8]) -> Result<Self, ElfError> {
-        Self::parse(data)
+    fn parse_with_opts(data: &'data [u8], opts: ParseObjectOptions) -> Result<Self, ElfError> {
+        Self::parse_with_opts(data, opts)
     }
 }
 

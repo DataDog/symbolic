@@ -1,8 +1,12 @@
-use std::{env, ffi::CString, fmt, io::BufWriter};
+use std::ffi::CString;
+use std::fmt;
+use std::io::BufWriter;
 
-use symbolic_common::ByteView;
+use symbolic_common::{ByteView, Language};
+use symbolic_debuginfo::dwarf::DwarfErrorKind;
+use symbolic_debuginfo::elf::ElfObject;
 use symbolic_debuginfo::{
-    elf::ElfObject, pe::PeObject, FileEntry, Function, LineInfo, Object, SymbolMap,
+    pe::PeObject, FileEntry, Function, LineInfo, Object, ParseObjectOptions, SymbolMap,
 };
 use symbolic_testutils::fixture;
 
@@ -262,12 +266,54 @@ fn test_elf_debug() -> Result<(), Error> {
 }
 
 #[test]
+fn test_elf_dynsyms() -> Result<(), Error> {
+    let view = ByteView::open(fixture("linux/dynsyms_only"))?;
+    let object = Object::parse(&view)?;
+
+    insta::assert_debug_snapshot!(object, @r#"
+    Elf(
+        ElfObject {
+            code_id: Some(
+                CodeId(b931c4fbd186e551bb617b3807d594b9064f5cac),
+            ),
+            debug_id: DebugId {
+                uuid: "fbc431b9-86d1-51e5-bb61-7b3807d594b9",
+                appendix: 0,
+            },
+            arch: Amd64,
+            kind: Debug,
+            load_address: 0x0,
+            has_symbols: true,
+            has_debug_info: false,
+            has_unwind_info: false,
+            is_malformed: false,
+        },
+    )
+    "#);
+
+    Ok(())
+}
+
+#[test]
 fn test_elf_symbols() -> Result<(), Error> {
     let view = ByteView::open(fixture("linux/crash.debug"))?;
     let object = Object::parse(&view)?;
 
     let symbols = object.symbol_map();
     insta::assert_debug_snapshot!("elf_symbols", SymbolsDebug(&symbols));
+
+    let view = ByteView::open(fixture("linux/dynsyms_only"))?;
+    let object = Object::parse(&view)?;
+
+    let symbols = object.symbol_map();
+    insta::assert_debug_snapshot!(SymbolsDebug(&symbols), @r"
+    690 __vdso_gettimeofday
+    9e0 __vdso_time
+    a10 clock_gettime
+    e30 clock_getres
+    e90 __vdso_getcpu
+    ec0 __vdso_sgx_enter_enclave
+    ");
 
     Ok(())
 }
@@ -380,6 +426,44 @@ fn test_elf_debug_link_padding() -> Result<(), Error> {
 // while without compression the "Borrowed" is exerted.
 fn test_elf_debug_link_compressed() -> Result<(), Error> {
     check_debug_info("elf_with_compressed_debuglink", "debug_info.txt")
+}
+
+#[test]
+fn test_elf_compressed_gnu() {
+    let view = ByteView::open(fixture("regression/elf_compressed_gnu")).unwrap();
+    let mut opts = ParseObjectOptions::default();
+
+    let object = ElfObject::parse_with_opts(&view, opts).unwrap();
+
+    // Opening the session fails because the debuginfo section isn't actually valid.
+    assert!(object
+        .debug_session()
+        .is_err_and(|err| err.kind() == DwarfErrorKind::CorruptedData));
+
+    opts.max_decompressed_section_size = Some(5);
+    let object = ElfObject::parse_with_opts(&view, opts).unwrap();
+
+    // Opening the session succeeds now because the broken section isn't read.
+    assert!(object.debug_session().is_ok());
+}
+
+#[test]
+fn test_elf_compressed_shf() {
+    let view = ByteView::open(fixture("regression/elf_compressed_shf")).unwrap();
+    let mut opts = ParseObjectOptions::default();
+
+    let object = ElfObject::parse_with_opts(&view, opts).unwrap();
+
+    // Opening the session fails because the debuginfo section isn't actually valid.
+    assert!(object
+        .debug_session()
+        .is_err_and(|err| err.kind() == DwarfErrorKind::CorruptedData));
+
+    opts.max_decompressed_section_size = Some(5);
+    let object = ElfObject::parse_with_opts(&view, opts).unwrap();
+
+    // Opening the session succeeds now because the broken section isn't read.
+    assert!(object.debug_session().is_ok());
 }
 
 #[test]
@@ -574,6 +658,27 @@ fn test_pe_dwarf_functions() -> Result<(), Error> {
     let session = object.debug_session()?;
     let functions = session.functions().collect::<Result<Vec<_>, _>>()?;
     insta::assert_debug_snapshot!("pe_dwarf_functions", FunctionsDebug(&functions[..10], 0));
+
+    Ok(())
+}
+
+#[test]
+fn test_pe_dwarf_msys2_qglib() -> Result<(), Error> {
+    // Regression test for stripped MSYS2 PE debug companions that carry DWARF info.
+    let compressed = std::fs::read(fixture("windows/msys2-qglib.debug.zst"))?;
+    let buffer = zstd::stream::decode_all(&compressed[..])?;
+
+    let view = ByteView::from_vec(buffer);
+    let object = Object::parse(&view)?;
+
+    insta::assert_debug_snapshot!("pe_dwarf_msys2_qglib", object);
+
+    let session = object.debug_session()?;
+    let functions = session.functions().collect::<Result<Vec<_>, _>>()?;
+    insta::assert_debug_snapshot!(
+        "pe_dwarf_msys2_qglib_functions",
+        FunctionsDebug(&functions[..10], 0)
+    );
 
     Ok(())
 }
@@ -820,6 +925,20 @@ fn test_ppdb_source_by_path() -> Result<(), Error> {
 }
 
 #[test]
+fn test_ppdb_source_by_path_size_limit() {
+    let mut opts = ParseObjectOptions::default();
+    opts.max_decompressed_embedded_source_size = Some(200);
+
+    let view = ByteView::open(fixture("windows/Sentry.Samples.Console.Basic.pdb")).unwrap();
+    let object = Object::parse_with_opts(&view, opts).unwrap();
+
+    let session = object.debug_session().unwrap();
+    session
+        .source_by_path("C:\\dev\\sentry-dotnet\\samples\\Sentry.Samples.Console.Basic\\Program.cs")
+        .unwrap_err();
+}
+
+#[test]
 fn test_ppdb_source_links() -> Result<(), Error> {
     let view = ByteView::open(fixture("ppdb-sourcelink-sample/ppdb-sourcelink-sample.pdb"))?;
     let object = Object::parse(&view)?;
@@ -890,6 +1009,69 @@ fn test_wasm_line_program() -> Result<(), Error> {
         .expect("main function at 0x8b");
 
     assert_eq!(main_function.name, "internal_func");
+
+    Ok(())
+}
+
+#[test]
+fn test_wasm_functions() -> Result<(), Error> {
+    let view = ByteView::open(fixture("wasm/emscripten/index.wasm"))?;
+    let object = Object::parse(&view)?;
+
+    let session = object.debug_session().unwrap();
+    let r = session.functions().collect::<Vec<_>>();
+
+    insta::assert_debug_snapshot!(r);
+
+    Ok(())
+}
+
+fn find_functions_by_name<'a>(functions: &'a [Function<'a>], name: &str) -> Vec<&'a Function<'a>> {
+    let mut result = Vec::new();
+    for f in functions {
+        if f.name.as_str() == name {
+            result.push(f);
+        }
+        result.extend(find_functions_by_name(&f.inlinees, name));
+    }
+    result
+}
+
+#[test]
+fn test_lto_language_detection() -> Result<(), Error> {
+    // libjemalloc is compiled as C but LTO creates artificial CUs with DW_LANG_C_plus_plus.
+    // The fix follows DW_AT_abstract_origin cross-unit to find the true source language.
+    let view = ByteView::open(fixture("linux/libjemalloc.so.debug"))?;
+    let object = Object::parse(&view)?;
+    let session = object.debug_session()?;
+
+    let functions: Vec<_> = session.functions().filter_map(|f| f.ok()).collect();
+
+    for name in &["je_tcache_arena_associate", "malloc_mutex_trylock_final"] {
+        let matches = find_functions_by_name(&functions, name);
+        assert!(!matches.is_empty(), "{name} should be found");
+        for func in matches {
+            assert_eq!(func.name.language(), Language::C, "{name} should be C");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_cross_language_lto_inlinee_language() -> Result<(), Error> {
+    // cross_lang_lto is a Rust binary that inlines a C function (my_add) via LTO.
+    // The inlinee should be detected as C, not Rust.
+    let view = ByteView::open(fixture("linux/cross_language_lto.debug"))?;
+    let object = Object::parse(&view)?;
+    let session = object.debug_session()?;
+
+    let functions: Vec<_> = session.functions().filter_map(|f| f.ok()).collect();
+    let matches = find_functions_by_name(&functions, "my_add");
+    assert!(!matches.is_empty(), "my_add should be found as an inlinee");
+    for func in matches {
+        assert_eq!(func.name.language(), Language::C, "my_add should be C");
+    }
 
     Ok(())
 }
