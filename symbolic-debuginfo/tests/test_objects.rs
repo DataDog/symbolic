@@ -1,8 +1,12 @@
-use std::{ffi::CString, fmt, io::BufWriter};
+use std::ffi::CString;
+use std::fmt;
+use std::io::BufWriter;
 
 use symbolic_common::{ByteView, Language};
+use symbolic_debuginfo::dwarf::DwarfErrorKind;
+use symbolic_debuginfo::elf::ElfObject;
 use symbolic_debuginfo::{
-    elf::ElfObject, pe::PeObject, FileEntry, Function, LineInfo, Object, SymbolMap,
+    pe::PeObject, FileEntry, Function, LineInfo, Object, ParseObjectOptions, SymbolMap,
 };
 use symbolic_testutils::fixture;
 
@@ -422,6 +426,44 @@ fn test_elf_debug_link_padding() -> Result<(), Error> {
 // while without compression the "Borrowed" is exerted.
 fn test_elf_debug_link_compressed() -> Result<(), Error> {
     check_debug_info("elf_with_compressed_debuglink", "debug_info.txt")
+}
+
+#[test]
+fn test_elf_compressed_gnu() {
+    let view = ByteView::open(fixture("regression/elf_compressed_gnu")).unwrap();
+    let mut opts = ParseObjectOptions::default();
+
+    let object = ElfObject::parse_with_opts(&view, opts).unwrap();
+
+    // Opening the session fails because the debuginfo section isn't actually valid.
+    assert!(object
+        .debug_session()
+        .is_err_and(|err| err.kind() == DwarfErrorKind::CorruptedData));
+
+    opts.max_decompressed_section_size = Some(5);
+    let object = ElfObject::parse_with_opts(&view, opts).unwrap();
+
+    // Opening the session succeeds now because the broken section isn't read.
+    assert!(object.debug_session().is_ok());
+}
+
+#[test]
+fn test_elf_compressed_shf() {
+    let view = ByteView::open(fixture("regression/elf_compressed_shf")).unwrap();
+    let mut opts = ParseObjectOptions::default();
+
+    let object = ElfObject::parse_with_opts(&view, opts).unwrap();
+
+    // Opening the session fails because the debuginfo section isn't actually valid.
+    assert!(object
+        .debug_session()
+        .is_err_and(|err| err.kind() == DwarfErrorKind::CorruptedData));
+
+    opts.max_decompressed_section_size = Some(5);
+    let object = ElfObject::parse_with_opts(&view, opts).unwrap();
+
+    // Opening the session succeeds now because the broken section isn't read.
+    assert!(object.debug_session().is_ok());
 }
 
 #[test]
@@ -883,6 +925,20 @@ fn test_ppdb_source_by_path() -> Result<(), Error> {
 }
 
 #[test]
+fn test_ppdb_source_by_path_size_limit() {
+    let mut opts = ParseObjectOptions::default();
+    opts.max_decompressed_embedded_source_size = Some(200);
+
+    let view = ByteView::open(fixture("windows/Sentry.Samples.Console.Basic.pdb")).unwrap();
+    let object = Object::parse_with_opts(&view, opts).unwrap();
+
+    let session = object.debug_session().unwrap();
+    session
+        .source_by_path("C:\\dev\\sentry-dotnet\\samples\\Sentry.Samples.Console.Basic\\Program.cs")
+        .unwrap_err();
+}
+
+#[test]
 fn test_ppdb_source_links() -> Result<(), Error> {
     let view = ByteView::open(fixture("ppdb-sourcelink-sample/ppdb-sourcelink-sample.pdb"))?;
     let object = Object::parse(&view)?;
@@ -953,6 +1009,19 @@ fn test_wasm_line_program() -> Result<(), Error> {
         .expect("main function at 0x8b");
 
     assert_eq!(main_function.name, "internal_func");
+
+    Ok(())
+}
+
+#[test]
+fn test_wasm_functions() -> Result<(), Error> {
+    let view = ByteView::open(fixture("wasm/emscripten/index.wasm"))?;
+    let object = Object::parse(&view)?;
+
+    let session = object.debug_session().unwrap();
+    let r = session.functions().collect::<Vec<_>>();
+
+    insta::assert_debug_snapshot!(r);
 
     Ok(())
 }

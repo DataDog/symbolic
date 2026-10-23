@@ -1,6 +1,8 @@
 use std::str;
+use std::sync::mpsc;
+use std::time::Duration;
 
-use symbolic_cfi::{AsciiCfiWriter, CfiCache};
+use symbolic_cfi::{AsciiCfiWriter, CfiCache, CfiErrorKind};
 use symbolic_common::ByteView;
 use symbolic_debuginfo::Object;
 use symbolic_testutils::fixture;
@@ -158,4 +160,43 @@ fn cfi_from_elf_arm64() -> Result<(), Error> {
     insta::assert_snapshot!("cfi_elf_arm64", cfi);
 
     Ok(())
+}
+
+#[test]
+fn cfi_from_pe_arm64() -> Result<(), Error> {
+    let buffer = ByteView::open(fixture("windows/arm64/test.exe"))?;
+    let object = Object::parse(&buffer)?;
+
+    let buf: Vec<u8> = AsciiCfiWriter::transform(&object)?;
+    let cfi = str::from_utf8(&buf)?;
+    // Verify that .ra: x30 appears in INIT rows
+    insta::assert_snapshot!("cfi_pe_arm64", cfi);
+
+    Ok(())
+}
+
+#[test]
+fn cfi_process_pe_self_loop_terminates() {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let buffer = ByteView::open(fixture("windows/cfi_chained_loop.exe"))
+            .expect("failed to open fixture");
+        let object = Object::parse(&buffer).expect("failed to parse PE");
+
+        let mut buf = Vec::new();
+        let result = AsciiCfiWriter::new(&mut buf)
+            .max_unwind_chain_len(Some(8))
+            .process(&object)
+            .map_err(|e| e.kind());
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(result) => assert_eq!(
+            result,
+            Err(CfiErrorKind::ExceededUnwindChainLength),
+            "should be rejected once the limit is reached"
+        ),
+        Err(_) => panic!("process_pe did not terminate: loop is unbounded"),
+    }
 }

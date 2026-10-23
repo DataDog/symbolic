@@ -1,5 +1,158 @@
 # Changelog
 
+## 13.9.0
+
+**Fixes**
+
+- Add limit on inline nesting depth when parsing Breakpad objects. ([#1014](https://github.com/getsentry/symbolic/pull/1014))
+- Fix potential out of bounds panic on invalid section offsets ([#1013](https://github.com/getsentry/symbolic/pull/1013))
+- Fix a potential panic when locating sections in an elf file. ([#1012](https://github.com/getsentry/symbolic/pull/1012))
+
+## 13.8.0
+
+**Features**
+
+- Add limit on chained `UNWIND_INFO` traversal in CFI generation. ([#1007](https://github.com/getsentry/symbolic/pull/1007))
+
+## 13.7.0
+
+**Features**
+
+- Add recursion limit to vendored msvc-demangler. ([#1006](https://github.com/getsentry/symbolic/pull/1006))
+- Vendor [msvc-demangler](https://github.com/mstange/msvc-demangler-rust). ([#998](https://github.com/getsentry/symbolic/pull/998))
+- WASM: expose `il2cppLineMapping(object, provider)`, which extracts a Unity Il2cpp C++→C# line mapping by parsing `source_info` markers from an object's referenced C++ source files and returns it as a JSON document (or `undefined` when no mappings are found). Source file contents are supplied by a `(path) => Uint8Array | null` provider callback, so it works without filesystem access. `symbolic-il2cpp` also gains `ObjectLineMapping::from_object_with_provider`, the filesystem-free counterpart of `from_object`. ([#1005](https://github.com/getsentry/symbolic/pull/1005))
+- WASM: expose `ObjectFile.asPe()` to narrow an object to a `PeFile`, and `PeFile.embeddedPpdb()` returning the decompressed Portable PDB embedded in a managed Windows PE (a standalone, parseable debug information file), or `undefined` when there is no embedded PPDB. ([#1004](https://github.com/getsentry/symbolic/pull/1004))
+
+**Fixes**
+
+- Fix bugs in the vendored msvc-demangler lib. ([#1008](https://github.com/getsentry/symbolic/pull/1008))
+
+**Dependencies**
+
+- Bump the `memmap2` floor to 0.9.11 to exclude versions affected by [RUSTSEC-2026-0186](https://rustsec.org/advisories/RUSTSEC-2026-0186.html). ([#996](https://github.com/getsentry/symbolic/pull/996))
+
+## 13.6.1
+
+**Fixes**
+
+- Fix function range to addr/line resolution, this fixes a case where WASM binaries compiled with Emscripten failed to have their source code mappings resolved. (#[1002](https://github.com/getsentry/symbolic/pull/1002))
+
+## 13.6.0
+
+**Features**
+
+- `symbolic-debuginfo`: Add a new option `max_decompressed_embedded_source_size` to `ParseObjectOptions`. This option limits the sizes of compressed embedded source files
+  when they are returned from methods like `source_by_path`. ([#999](https://github.com/getsentry/symbolic/pull/999))
+
+## 13.5.0
+
+**Features**
+
+- WASM: expose `ObjectFile.debugSession()` returning a `DebugSession` with `files()` (the source files referenced by the object) and `sourceByPath(path)` (resolving embedded contents or a source link). `symbolic-debuginfo` also implements `AsSelf` for `ObjectDebugSession` so it can be held in a `SelfCell`. ([#997](https://github.com/getsentry/symbolic/pull/997))
+
+## 13.4.0
+
+**Features**
+
+- `symbolic-debuginfo`: add `SourceBundleWriter::write_object_with_filter_and_provider`, which builds a source bundle from caller-supplied source content instead of relying on the local filesystem. ([#988](https://github.com/getsentry/symbolic/pull/988))
+
+**Fixes**
+
+- Fix issue with overflowing section offsets in 64bit Mach-O files. ([#985](https://github.com/getsentry/symbolic/pull/985))
+
+**Changes**
+
+- Rework WASM API to expose lower level `symbolic` types. ([#992](https://github.com/getsentry/symbolic/pull/992))
+- `symbolic-debuginfo`: use the C `zstd` library on wasm32 too (via zstd-sys's wasm-shim), replacing the `ruzstd` decoder added in #989. One zstd implementation for all targets; `ruzstd` is no longer a dependency. Building for wasm now requires clang. ([#990](https://github.com/getsentry/symbolic/pull/990))
+
+## 13.3.1
+
+**Changes**
+
+- `symbolic-debuginfo`: select the C `zstd` library (native) vs the pure-Rust `ruzstd` decoder (wasm32) via `cfg(target_arch)` instead of the `elf-zstd`/`elf-zstd-pure` features. `features = ["elf"]` again includes zstd support on native (the feature split in #986 had silently removed it). `ruzstd` was bumped to 0.8.3 and now rejects size mismatches instead of truncating. ([#989](https://github.com/getsentry/symbolic/pull/989))
+
+## 13.3.0
+
+**Features**
+
+- Add WebAssembly bindings (`symbolic-wasm` crate) published to npm as `@sentry/symbolic`, for parsing debug information files from JavaScript. ([#986](https://github.com/getsentry/symbolic/pull/986))
+
+**Changes**
+
+- `symbolic-debuginfo`: the `zstd` dependency moved out of the `elf` feature into a new `elf-zstd` feature (kept in `default`, so default builds are unchanged). Consumers using `default-features = false` with `elf` should add `elf-zstd` to keep decompressing zstd-compressed ELF debug sections, or `elf-zstd-pure` for a pure-Rust (wasm-compatible) decoder. ([#986](https://github.com/getsentry/symbolic/pull/986))
+
+## 13.2.0
+
+**Features**
+
+- Add parsing options for object files. ([#984](https://github.com/getsentry/symbolic/pull/984))
+
+## 13.1.1
+
+**Features**
+
+- Add support for win arm64 PE unwind codes ([#978](https://github.com/getsentry/symbolic/pull/978))
+
+**Fixes**
+
+- Disable `PE` import table parser and be more permissive during parsing. ([#964](https://github.com/getsentry/symbolic/pull/964))
+
+## 13.1.0
+
+**Features**
+
+- Updated libswift demangle to v6.3.1. ([#980](https://github.com/getsentry/symbolic/pull/980))
+
+## 13.0.0
+
+**Features**
+
+- Extract srcsrv data from PDB for file mapping by @mujajica and @loewenheim.
+  This includes a bump of the SymCache format to version 9. ([#943](https://github.com/getsentry/symbolic/pull/943))
+
+**Dependencies**
+
+- Update several publicly exposed dependencies:
+  - `gimli`: 0.32.3 -> 0.33.0
+  - `goblin`: 0.8.0 -> 0.10.5
+  - `scroll`: 0.12.0 -> 0.13.0
+    ([#976](https://github.com/getsentry/symbolic/pull/976))
+
+## 12.18.3
+
+**Internal Changes** 🔧
+
+- (js) Allow magic comments to appear anywhere by @Dav1dde in [#974](https://github.com/getsentry/symbolic/pull/974)
+
+## 12.18.2
+
+- Downgrade `cpp_demangle` version to 0.4.1. Symbolicator is currently dependent on this. ([#972](https://github.com/getsentry/symbolic/pull/972))
+
+## 12.18.1
+
+**Improvements**
+
+- sourcemapcache: Bump `js-source-scopes` to 0.7.2. This improves name resolution via https://github.com/getsentry/js-source-scopes/pull/35. ([#970](https://github.com/getsentry/symbolic/pull/970))
+
+## 12.18.0
+
+**Improvements**
+
+- symcache: Change internal representation to enable old versions to remain parseable. ([#947](https://github.com/getsentry/symbolic/pull/947))
+- feat: Add `Unreal4File::into_bytes`. ([#967](https://github.com/getsentry/symbolic/pull/967))
+
+## 12.17.4
+
+**Fixes**
+
+- Revert "Use goblin permissive PE parse-mode". This change breaks API compatibility and should
+  not have been released in a patch version. ([#966](https://github.com/getsentry/symbolic/pull/966))
+
+**Improvements**
+
+- Enable symbolize and CFI by default in `examples/minidump_stackwalk`, and replace their
+  corresponding flags `--symbolize` and `--cfi` with `--no-symbolize` and `--no-cfi` respectively. ([#963](https://github.com/getsentry/symbolic/pull/963))
+
 ## 12.17.3
 
 **Fixes**
