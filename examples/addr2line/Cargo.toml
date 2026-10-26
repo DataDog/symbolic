@@ -1,6 +1,6 @@
 [package]
 name = "addr2line"
-version = "13.9.0-dd"
+version = "13.9.1-dd"
 authors = ["Jan Michael Auer <mail@jauer.org>"]
 edition = "2021"
 publish = false
@@ -10,4 +10,4 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
-symbolic = { version = "13.9.0-dd", path = "../../symbolic", features = ["demangle"] }
+symbolic = { version = "13.9.1-dd", path = "../../symbolic", features = ["demangle"] }
