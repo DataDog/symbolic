@@ -546,6 +546,72 @@ mod tests {
         assert_eq!(frames[2]["trust"], "cfi");
     }
 
+    #[test]
+    fn process_unwinds_windows_arm64_with_pe_cfi() {
+        let dump =
+            include_bytes!("../../symbolic-testutils/fixtures/windows/arm64-unwind/fixture.dmp");
+        let pe =
+            include_bytes!("../../symbolic-testutils/fixtures/windows/arm64-unwind/fixture.exe");
+        let pdb =
+            include_bytes!("../../symbolic-testutils/fixtures/windows/arm64-unwind/fixture.pdb");
+
+        let pdb_object = Object::parse(pdb).unwrap();
+        let mut converter = SymCacheConverter::new();
+        converter.process_object(&pdb_object).unwrap();
+        let mut symcache = Vec::new();
+        converter
+            .serialize(&mut Cursor::new(&mut symcache))
+            .unwrap();
+
+        let pe_object = Object::parse(pe).unwrap();
+        assert_eq!(pe_object.debug_id(), pdb_object.debug_id());
+        let cfi = CfiCache::from_object(&pe_object).unwrap();
+        let cfi_text = std::str::from_utf8(cfi.as_slice()).unwrap();
+        assert!(
+            cfi_text.contains("STACK CFI 1044 .ra: .cfa -16 + ^"),
+            "{cfi_text}"
+        );
+
+        let process_with = |cfi_caches: &[CfiCacheInput<'_>]| -> Vec<(String, String)> {
+            let json = process(
+                dump,
+                &[SymCacheInput {
+                    contents: &symcache,
+                }],
+                cfi_caches,
+            )
+            .unwrap();
+            let report: Value = serde_json::from_str(&json).unwrap();
+            report["crashing_thread"]["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| {
+                    (
+                        f["function"].as_str().unwrap_or_default().to_owned(),
+                        f["trust"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect()
+        };
+
+        let with_cfi = process_with(&[CfiCacheInput {
+            debug_id: pe_object.debug_id(),
+            contents: cfi.as_slice(),
+        }]);
+        assert_eq!(
+            with_cfi,
+            [
+                ("caller_frame(int)".to_owned(), "context".to_owned()),
+                ("entry()".to_owned(), "cfi".to_owned()),
+            ]
+        );
+
+        // Without CFI the caller is only found by scanning the stack.
+        let without_cfi = process_with(&[]);
+        assert_eq!(without_cfi[1].1, "scan");
+    }
+
     fn check_non_windows_symbols_and_cfi(
         dump_bytes: &[u8],
         debug_bytes: &[u8],
