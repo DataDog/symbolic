@@ -5,7 +5,10 @@
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
-use symbolic_debuginfo::pe::Arm64UnwindCode;
+use symbolic_debuginfo::pe::{
+    Arm64RuntimeFunction, Arm64UnwindCode, ARM64_PDATA_PACKED_UNWIND_FRAGMENT,
+    ARM64_PDATA_PACKED_UNWIND_FUNCTION,
+};
 
 /// Size of one ARM64 instruction.
 const INSTRUCTION_SIZE: u32 = 4;
@@ -226,6 +229,153 @@ impl State {
     }
 }
 
+/// Synthesizes the unwind codes (in `.xdata` order) of a packed `.pdata` entry.
+///
+/// Follows the canonical prolog of the "Packed unwind data" section of the Microsoft
+/// documentation, in the same order as LLVM's `llvm-readobj --unwind` (`dumpPackedARM64Entry`).
+/// A packed fragment has no prolog, so its codes are prefixed with `end_c`. Returns `None` for
+/// entries that are not packed.
+pub(crate) fn packed_codes(function: &Arm64RuntimeFunction) -> Option<Vec<Arm64UnwindCode>> {
+    use Arm64UnwindCode::*;
+
+    let fragment = match function.flag() {
+        ARM64_PDATA_PACKED_UNWIND_FUNCTION => false,
+        ARM64_PDATA_PACKED_UNWIND_FRAGMENT => true,
+        _ => return None,
+    };
+    let (reg_i, reg_f, cr, h) = (
+        function.reg_i(),
+        function.reg_f(),
+        function.cr(),
+        function.h(),
+    );
+
+    let mut int_sz = 8 * reg_i;
+    if cr == 1 {
+        int_sz += 8;
+    }
+    let mut fp_sz = 8 * reg_f;
+    if reg_f != 0 {
+        fp_sz += 8;
+    }
+    let sav_sz = (int_sz + fp_sz + 8 * 8 * u32::from(h) + 0xf) & !0xf;
+    let mut loc_sz = function.frame_size().checked_sub(sav_sz)?;
+    let mut homing = h;
+    if h && reg_i == 0 && reg_f == 0 && cr != 1 {
+        loc_sz += sav_sz;
+        homing = false;
+    }
+
+    // Codes are pushed in reverse execution order, as stored in `.xdata`.
+    let mut codes = Vec::new();
+    if cr == 2 || cr == 3 {
+        codes.push(SetFp);
+        if loc_sz <= 512 {
+            codes.push(SaveFpLrPreindexed {
+                offset_bytes: loc_sz,
+            });
+        } else {
+            codes.push(SaveFpLr { offset_bytes: 0 });
+        }
+    }
+    if loc_sz > 4080 {
+        codes.push(AllocMedium {
+            size_bytes: loc_sz - 4080,
+        });
+        codes.push(AllocMedium { size_bytes: 4080 });
+    } else if (cr != 3 && cr != 2 && loc_sz > 0) || loc_sz > 512 {
+        codes.push(AllocMedium { size_bytes: loc_sz });
+    }
+    if homing {
+        codes.extend([Nop, Nop, Nop, Nop]);
+    }
+
+    let float_regs = if reg_f > 0 { reg_f + 1 } else { 0 };
+    for i in (0..float_regs.div_ceil(2)).rev() {
+        let first = (8 + 2 * i) as u8;
+        if i == float_regs.div_ceil(2) - 1 && float_regs % 2 == 1 {
+            codes.push(SaveFReg {
+                reg: first,
+                offset_bytes: int_sz + 16 * i,
+            });
+        } else if i == 0 && reg_i == 0 && cr != 1 {
+            codes.push(SaveFRegPairPreindexed {
+                first_reg: first,
+                offset_bytes: sav_sz,
+            });
+        } else {
+            codes.push(SaveFRegPair {
+                first_reg: first,
+                offset_bytes: int_sz + 16 * i,
+            });
+        }
+    }
+
+    if cr == 1 && reg_i % 2 == 0 {
+        if reg_i == 0 {
+            codes.push(SaveRegPreindexed {
+                reg: 30,
+                offset_bytes: sav_sz,
+            });
+        } else {
+            codes.push(SaveReg {
+                reg: 30,
+                offset_bytes: int_sz - 8,
+            });
+        }
+    }
+    for i in (0..reg_i.div_ceil(2)).rev() {
+        let first = (19 + 2 * i) as u8;
+        if i == reg_i.div_ceil(2) - 1 && reg_i % 2 == 1 {
+            // The last, unpaired register.
+            if cr == 1 {
+                if i == 0 {
+                    // `sub sp, sp, #savsz` followed by `stp x19, lr, [sp]`.
+                    codes.push(SaveLrPair {
+                        first_reg: 19,
+                        offset_bytes: 0,
+                    });
+                    codes.push(AllocMedium { size_bytes: sav_sz });
+                } else {
+                    codes.push(SaveLrPair {
+                        first_reg: first,
+                        offset_bytes: 16 * i,
+                    });
+                }
+            } else if i == 0 {
+                codes.push(SaveRegPreindexed {
+                    reg: first,
+                    offset_bytes: sav_sz,
+                });
+            } else {
+                codes.push(SaveReg {
+                    reg: first,
+                    offset_bytes: 16 * i,
+                });
+            }
+        } else if i == 0 {
+            codes.push(SaveRegPairPreindexed {
+                first_reg: 19,
+                offset_bytes: sav_sz,
+            });
+        } else {
+            codes.push(SaveRegPair {
+                first_reg: first,
+                offset_bytes: 16 * i,
+            });
+        }
+    }
+    if cr == 2 {
+        codes.push(PacSignLr);
+    }
+    codes.push(End);
+
+    if fragment {
+        codes.insert(0, EndC);
+    }
+    Some(codes)
+}
+
 /// Builds the CFI rows of a function from its unwind codes (as stored in `.xdata`).
 ///
 /// Returns `None` if the codes contain an operation this converter does not support.
@@ -247,11 +397,17 @@ pub(crate) fn prolog_rows(codes: &[Arm64UnwindCode]) -> Option<Vec<Row>> {
         for code in established.into_iter().rev() {
             rules.push_str(&state.apply(code)?);
         }
-        rows[0].rules = if rules.contains(".cfa:") {
-            format!(" .ra: x30{rules}")
+        let cfa = if rules.contains(".cfa:") {
+            ""
         } else {
-            format!(" .cfa: sp 0 + .ra: x30{rules}")
+            " .cfa: sp 0 +"
         };
+        let ra = if rules.contains(".ra:") {
+            ""
+        } else {
+            " .ra: x30"
+        };
+        rows[0].rules = format!("{cfa}{ra}{rules}");
         return Some(rows);
     }
 
@@ -384,7 +540,7 @@ mod tests {
             rules(&codes),
             vec![(
                 0,
-                " .ra: x30 .cfa: sp 16 + x29: .cfa -16 + ^ .ra: .cfa -8 + ^".into()
+                " .cfa: sp 16 + x29: .cfa -16 + ^ .ra: .cfa -8 + ^".into()
             )]
         );
     }
@@ -404,5 +560,83 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "STACK CFI INIT 1000 4 .cfa: sp 0 + .ra: x30\n"
         );
+    }
+
+    /// Builds a packed `.pdata` entry: Flag=1 (packed function) with the given fields.
+    fn packed(length: u32, reg_i: u32, cr: u32, frame_size: u32) -> Arm64RuntimeFunction {
+        Arm64RuntimeFunction {
+            begin_address: 0x1000,
+            unwind_data: 1 | (length / 4) << 2 | reg_i << 16 | cr << 21 | (frame_size / 16) << 23,
+        }
+    }
+
+    #[test]
+    fn packed_leaf_allocates_stack() {
+        // CR=0, FrameSize=32: `sub sp, sp, #32`.
+        let codes = packed_codes(&packed(0x34, 0, 0, 32)).unwrap();
+        assert_eq!(codes, [AllocMedium { size_bytes: 32 }, End]);
+        assert_eq!(
+            rules(&codes),
+            vec![
+                (0, " .cfa: sp 0 + .ra: x30".into()),
+                (4, " .cfa: sp 32 +".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn packed_saved_lr() {
+        // CR=1, RegI=0, FrameSize=16: `str lr, [sp, #-16]!`.
+        let codes = packed_codes(&packed(0x20, 0, 1, 16)).unwrap();
+        assert_eq!(
+            rules(&codes),
+            vec![
+                (0, " .cfa: sp 0 + .ra: x30".into()),
+                (4, " .cfa: sp 16 + .ra: .cfa -16 + ^".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn packed_chained_frame_with_saved_registers() {
+        // CR=3, RegI=2, FrameSize=48:
+        // stp x19, x20, [sp, #-16]! ; stp x29, lr, [sp, #-32]! ; mov x29, sp
+        let codes = packed_codes(&packed(0x40, 2, 3, 48)).unwrap();
+        assert_eq!(
+            rules(&codes),
+            vec![
+                (0, " .cfa: sp 0 + .ra: x30".into()),
+                (
+                    4,
+                    " .cfa: sp 16 + x19: .cfa -16 + ^ x20: .cfa -8 + ^".into()
+                ),
+                (
+                    8,
+                    " .cfa: sp 48 + x29: .cfa -48 + ^ .ra: .cfa -40 + ^".into()
+                ),
+                (12, " .cfa: x29 48 +".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn packed_fragment_has_established_frame() {
+        let mut function = packed(0x20, 0, 1, 16);
+        function.unwind_data = (function.unwind_data & !3) | 2;
+        let codes = packed_codes(&function).unwrap();
+        assert_eq!(codes[0], EndC);
+        assert_eq!(
+            rules(&codes),
+            vec![(0, " .cfa: sp 16 + .ra: .cfa -16 + ^".into())]
+        );
+    }
+
+    #[test]
+    fn full_xdata_entries_are_not_packed() {
+        let function = Arm64RuntimeFunction {
+            begin_address: 0x1000,
+            unwind_data: 0x2000,
+        };
+        assert!(packed_codes(&function).is_none());
     }
 }

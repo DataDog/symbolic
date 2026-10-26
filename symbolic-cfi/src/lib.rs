@@ -1250,8 +1250,8 @@ impl<W: Write> AsciiCfiWriter<W> {
     /// so the rules of the n-th prolog instruction apply from `begin + 4 * (n + 1)`.
     ///
     /// Register names follow the rust-minidump ARM64 walker (`sp`, `x0`..`x30`), and a spilled
-    /// link register is described through `.ra`. Packed `.pdata` entries (no `.xdata`) and
-    /// epilogs are not converted yet; functions using unsupported codes are skipped.
+    /// link register is described through `.ra`. Packed `.pdata` entries are expanded to their
+    /// canonical prolog. Epilogs are not converted; functions using unsupported codes are skipped.
     fn process_pe_arm64(&mut self, pe: &PeObject<'_>) -> Result<(), CfiError> {
         let sections = pe.sections();
         let exception_data = match pe.exception_data() {
@@ -1264,25 +1264,33 @@ impl<W: Write> AsciiCfiWriter<W> {
             let function =
                 function_result.map_err(|e| CfiError::new(CfiErrorKind::BadDebugInfo, e))?;
 
-            // Packed entries carry their unwind data in `.pdata` and yield `None` here.
-            let Some(Ok(unwind_info)) = exception_data.get_unwind_info_arm64(function, sections)
-            else {
-                continue;
+            codes.clear();
+            let function_length = if function.is_packed() {
+                // Packed entries carry a canonical prolog description in `.pdata`.
+                let Some(packed) = arm64::packed_codes(&function) else {
+                    continue;
+                };
+                codes.extend(packed);
+                function.function_length()
+            } else {
+                let Some(Ok(unwind_info)) =
+                    exception_data.get_unwind_info_arm64(function, sections)
+                else {
+                    continue;
+                };
+                let Ok(code_iter) = unwind_info.unwind_codes(0) else {
+                    continue;
+                };
+                for code in code_iter {
+                    match code {
+                        Ok(code) => codes.push(code.code),
+                        Err(_) => continue 'functions,
+                    }
+                }
+                unwind_info.header.function_length()
             };
-            let function_length = unwind_info.header.function_length();
             if function_length == 0 {
                 continue;
-            }
-
-            codes.clear();
-            let Ok(code_iter) = unwind_info.unwind_codes(0) else {
-                continue;
-            };
-            for code in code_iter {
-                match code {
-                    Ok(code) => codes.push(code.code),
-                    Err(_) => continue 'functions,
-                }
             }
 
             if let Some(rows) = arm64::prolog_rows(&codes) {
