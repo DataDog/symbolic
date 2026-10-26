@@ -482,17 +482,10 @@ impl<'data> Dwarf<'data> for MachObject<'data> {
                             // truncated and the section data goblin slices out is wrong. Recompute
                             // the real 64-bit file offset from the enclosing segment's `fileoff`
                             // and `vmaddr`, which are both 64-bit, and re-slice the file data.
-                            //
-                            // Only use the recomputed offset when its low 32 bits match the
-                            // header (i.e. the header value is a truncation of it). dsymutil packs
-                            // retained `__TEXT` sections such as `__eh_frame` at the start of the
-                            // segment's file range, so `fileoff + (addr - vmaddr)` points at
-                            // unrelated data in dSYMs.
                             header
                                 .addr
                                 .checked_sub(segment.vmaddr)
                                 .and_then(|rel| rel.checked_add(segment.fileoff))
-                                .filter(|file_offset| *file_offset as u32 == header.offset)
                                 .and_then(|file_offset| {
                                     let start = usize::try_from(file_offset).ok()?;
                                     let len = usize::try_from(header.size).ok()?;

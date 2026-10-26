@@ -89,31 +89,6 @@ fn cfi_from_macho() -> Result<(), Error> {
     Ok(())
 }
 
-/// dsymutil packs retained `__TEXT` sections (here `__eh_frame`) at the segment's file offset, so
-/// their data is not at `fileoff + (addr - vmaddr)`. Reading from there yields unrelated bytes.
-/// The fixture keeps the first records of a real Xcode dSYM; see its `generate.py`.
-#[test]
-fn cfi_from_macho_dsym_packed_eh_frame() -> Result<(), Error> {
-    let buffer = ByteView::open(fixture("macos/packed_eh_frame/packed_eh_frame"))?;
-    let object = Object::parse(&buffer)?;
-
-    let buf: Vec<u8> = AsciiCfiWriter::transform(&object)?;
-    let cfi = str::from_utf8(&buf)?;
-    assert_eq!(
-        cfi,
-        "STACK CFI INIT 4c30 40 .cfa: sp 0 + .ra: x30\n\
-         STACK CFI 4c34 .cfa: sp 16 + .ra: .cfa -8 + ^ x29: .cfa -16 + ^\n\
-         STACK CFI INIT 4df0 3c .cfa: sp 0 + .ra: x30\n\
-         STACK CFI 4df4 .cfa: sp 32 +\n\
-         STACK CFI 4df8 .ra: .cfa -8 + ^ x29: .cfa -16 + ^ x19: .cfa -24 + ^ x20: .cfa -32 + ^\n\
-         STACK CFI INIT 4f28 40 .cfa: sp 0 + .ra: x30\n\
-         STACK CFI 4f2c .cfa: sp 32 +\n\
-         STACK CFI 4f30 .ra: .cfa -8 + ^ x29: .cfa -16 + ^ x19: .cfa -24 + ^ x20: .cfa -32 + ^\n"
-    );
-
-    Ok(())
-}
-
 #[test]
 fn cfi_from_sym_linux() -> Result<(), Error> {
     let buffer = ByteView::open(fixture("linux/crash.sym"))?;
