@@ -442,13 +442,18 @@ fn merge_rules(rules: &str) -> String {
     out
 }
 
-/// Writes the CFI rows of one function. Rows past the end of the function are dropped.
+/// Writes the CFI rows of one function. Rows past the end of the function are dropped, and so is
+/// a function whose address range does not fit in 32 bits (malformed `.pdata`).
 pub(crate) fn write_function<W: Write>(
     writer: &mut W,
     begin: u32,
     length: u32,
     rows: &[Row],
 ) -> io::Result<()> {
+    // Every row offset is below `length`, so `begin + row.offset` cannot overflow below.
+    if begin.checked_add(length).is_none() {
+        return Ok(());
+    }
     for row in rows {
         if row.offset == 0 {
             writeln!(writer, "STACK CFI INIT {begin:x} {length:x}{}", row.rules)?;
@@ -581,6 +586,29 @@ mod tests {
                 ),
                 (4, " x21: .cfa -16 + ^".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn functions_past_the_address_space_are_skipped() {
+        let rows = [
+            Row {
+                offset: 0,
+                rules: " .cfa: sp 0 + .ra: x30".into(),
+            },
+            Row {
+                offset: 4,
+                rules: " .cfa: sp 16 +".into(),
+            },
+        ];
+        let mut out = Vec::new();
+        write_function(&mut out, u32::MAX - 3, 8, &rows).unwrap();
+        assert!(out.is_empty());
+
+        write_function(&mut out, u32::MAX - 8, 8, &rows).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "STACK CFI INIT fffffff7 8 .cfa: sp 0 + .ra: x30\nSTACK CFI fffffffb .cfa: sp 16 +\n"
         );
     }
 
