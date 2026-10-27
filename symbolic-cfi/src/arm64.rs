@@ -380,45 +380,34 @@ pub(crate) fn packed_codes(function: &Arm64RuntimeFunction) -> Option<Vec<Arm64U
 ///
 /// Returns `None` if the codes contain an operation this converter does not support.
 pub(crate) fn prolog_rows(codes: &[Arm64UnwindCode]) -> Option<Vec<Row>> {
+    let is_end = |c: &&Arm64UnwindCode| matches!(c, Arm64UnwindCode::End | Arm64UnwindCode::EndC);
+
+    // Codes up to the first `end`/`end_c` describe this function's own prolog. When that
+    // terminator is `end_c`, the codes that follow it (up to `end`) describe a frame that is
+    // already established on entry: a prolog-less fragment (codes start with `end_c`) or a
+    // secondary prolog that runs after the primary one (shrink-wrapping).
+    let own = codes.iter().take_while(|c| !is_end(c)).collect::<Vec<_>>();
+    let established = match codes.get(own.len()) {
+        Some(Arm64UnwindCode::EndC) => codes[own.len() + 1..]
+            .iter()
+            .take_while(|c| !is_end(c))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+
+    let mut state = State::new();
+    let mut entry = String::from(" .cfa: sp 0 + .ra: x30");
+    for code in established.into_iter().rev() {
+        entry.push_str(&state.apply(code)?);
+    }
     let mut rows = vec![Row {
         offset: 0,
-        rules: " .cfa: sp 0 + .ra: x30".to_owned(),
+        rules: merge_rules(&entry),
     }];
-    let mut state = State::new();
-
-    // A function fragment without a prolog starts with `end_c`; the codes that follow describe
-    // the frame that is already established on entry to the fragment.
-    if let Some(Arm64UnwindCode::EndC) = codes.first() {
-        let established = codes[1..]
-            .iter()
-            .take_while(|c| !matches!(c, Arm64UnwindCode::End | Arm64UnwindCode::EndC))
-            .collect::<Vec<_>>();
-        let mut rules = String::new();
-        for code in established.into_iter().rev() {
-            rules.push_str(&state.apply(code)?);
-        }
-        let cfa = if rules.contains(".cfa:") {
-            ""
-        } else {
-            " .cfa: sp 0 +"
-        };
-        let ra = if rules.contains(".ra:") {
-            ""
-        } else {
-            " .ra: x30"
-        };
-        rows[0].rules = format!("{cfa}{ra}{rules}");
-        return Some(rows);
-    }
-
-    let prolog = codes
-        .iter()
-        .take_while(|c| !matches!(c, Arm64UnwindCode::End | Arm64UnwindCode::EndC))
-        .collect::<Vec<_>>();
 
     // Prolog codes are stored in reverse order; the n-th executed instruction takes effect at
     // the start of the next instruction.
-    for (index, code) in prolog.into_iter().rev().enumerate() {
+    for (index, code) in own.into_iter().rev().enumerate() {
         let rules = state.apply(code)?;
         if !rules.is_empty() {
             let offset = u32::try_from(index + 1)
@@ -428,6 +417,29 @@ pub(crate) fn prolog_rows(codes: &[Arm64UnwindCode]) -> Option<Vec<Row>> {
         }
     }
     Some(rows)
+}
+
+/// Keeps only the last rule for each register, with `.cfa` and `.ra` first.
+fn merge_rules(rules: &str) -> String {
+    let mut entries: Vec<(&str, Vec<&str>)> = Vec::new();
+    for token in rules.split_ascii_whitespace() {
+        if token.ends_with(':') {
+            entries.retain(|(key, _)| *key != token);
+            entries.push((token, Vec::new()));
+        } else if let Some((_, expr)) = entries.last_mut() {
+            expr.push(token);
+        }
+    }
+    entries.sort_by_key(|(key, _)| match *key {
+        ".cfa:" => 0,
+        ".ra:" => 1,
+        _ => 2,
+    });
+    let mut out = String::new();
+    for (key, expr) in entries {
+        write!(out, " {key} {}", expr.join(" ")).ok();
+    }
+    out
 }
 
 /// Writes the CFI rows of one function. Rows past the end of the function are dropped.
@@ -540,8 +552,35 @@ mod tests {
             rules(&codes),
             vec![(
                 0,
-                " .cfa: sp 16 + x29: .cfa -16 + ^ .ra: .cfa -8 + ^".into()
+                " .cfa: sp 16 + .ra: .cfa -8 + ^ x29: .cfa -16 + ^".into()
             )]
+        );
+    }
+
+    #[test]
+    fn secondary_prolog_after_end_c_keeps_primary_frame() {
+        // Shrink-wrapped: primary prolog `stp x19, x20, [sp, #-32]!; stp x29, x30, [sp, #-16]!;
+        // mov x29, sp` already ran; this region only adds `str x21, [sp, #32]`.
+        let codes = [
+            SaveReg {
+                reg: 21,
+                offset_bytes: 32,
+            },
+            EndC,
+            SetFp,
+            SaveFpLrPreindexed { offset_bytes: 16 },
+            SaveR19R20Preindexed { offset_bytes: 32 },
+            End,
+        ];
+        assert_eq!(
+            rules(&codes),
+            vec![
+                (
+                    0,
+                    " .cfa: x29 48 + .ra: .cfa -40 + ^ x19: .cfa -32 + ^ x20: .cfa -24 + ^ x29: .cfa -48 + ^".into()
+                ),
+                (4, " x21: .cfa -16 + ^".into()),
+            ]
         );
     }
 
