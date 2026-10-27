@@ -1273,6 +1273,8 @@ impl<W: Write> AsciiCfiWriter<W> {
                 codes.extend(packed);
                 function.function_length()
             } else {
+                // A function whose `.xdata` cannot be read or decoded is skipped, instead of failing
+                // the whole conversion, so the other functions keep their CFI.
                 let Some(Ok(unwind_info)) =
                     exception_data.get_unwind_info_arm64(function, sections)
                 else {

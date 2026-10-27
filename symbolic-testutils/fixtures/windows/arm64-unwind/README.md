@@ -11,3 +11,5 @@ The synthetic minidump stops in `caller_frame` at RVA 0x105c, after its call to 
 `x30` already holds the clobbered value 0x1058. SP is 0x120000, and the saved return address into
 `entry` (RVA 0x1078) is at SP+48. A correct CFI must recover `entry()` from the stack slot
 (`.ra: .cfa -16 + ^`) with CFI trust.
+
+`fixture.dmp` is written by `python3 make_dump.py`, which documents the thread context and stack bytes.
