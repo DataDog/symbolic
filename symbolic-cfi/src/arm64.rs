@@ -385,12 +385,14 @@ pub(crate) fn prolog_rows(codes: &[Arm64UnwindCode]) -> Option<Vec<Row>> {
     // Codes up to the first `end`/`end_c` describe this function's own prolog. When that
     // terminator is `end_c`, the codes that follow it (up to `end`) describe a frame that is
     // already established on entry: a prolog-less fragment (codes start with `end_c`) or a
-    // secondary prolog that runs after the primary one (shrink-wrapping).
+    // secondary prolog that runs after the primary one (shrink-wrapping). Later `end_c` markers
+    // separate nested parent scopes, whose codes all still apply.
     let own = codes.iter().take_while(|c| !is_end(c)).collect::<Vec<_>>();
     let established = match codes.get(own.len()) {
         Some(Arm64UnwindCode::EndC) => codes[own.len() + 1..]
             .iter()
-            .take_while(|c| !is_end(c))
+            .take_while(|c| !matches!(c, Arm64UnwindCode::End))
+            .filter(|c| !matches!(c, Arm64UnwindCode::EndC))
             .collect::<Vec<_>>(),
         _ => Vec::new(),
     };
@@ -586,6 +588,27 @@ mod tests {
                 ),
                 (4, " x21: .cfa -16 + ^".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn nested_end_c_scopes_keep_all_ancestor_rules() {
+        // Fragment whose parent is itself a secondary prolog: `stp x29, x30, [sp, #-16]!;
+        // mov x29, sp` ran in the outermost scope, then `sub sp, sp, #32`.
+        let codes = [
+            EndC,
+            AllocSmall { size_bytes: 32 },
+            EndC,
+            SetFp,
+            SaveFpLrPreindexed { offset_bytes: 16 },
+            End,
+        ];
+        assert_eq!(
+            rules(&codes),
+            vec![(
+                0,
+                " .cfa: x29 16 + .ra: .cfa -8 + ^ x29: .cfa -16 + ^".into()
+            )]
         );
     }
 
